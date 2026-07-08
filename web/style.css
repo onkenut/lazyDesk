@@ -19,13 +19,11 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* ====== z-0: 视频层 ====== */
-#remoteVideo {
-  pointer-events: none;
+/* ====== z-0: canvas 渲染层 ====== */
+#remoteCanvas {
   position: fixed;
   top: 0; left: 0;
   width: 100vw; height: 100vh;
-  object-fit: contain;
   z-index: 0;
   background: #111;
 }

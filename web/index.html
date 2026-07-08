@@ -11,10 +11,16 @@
 </head>
 <body>
 
-<video id="remoteVideo" autoplay playsinline muted></video>
+<!-- 隐藏的 video: 接收 WebRTC 流, 不显示 -->
+<video id="remoteVideo" autoplay playsinline muted style="display:none;"></video>
+
+<!-- canvas: 渲染视频帧 + 触控映射层 -->
+<canvas id="remoteCanvas"></canvas>
+
+<!-- 透明触控覆盖层 (在 canvas 之上) -->
 <div id="touchLayer"></div>
 
-<!-- 连接遮罩 (仅自动连接失败时显示) -->
+<!-- 连接遮罩 -->
 <div id="connectOverlay">
   <div class="overlay-logo">🖥️ → 📱</div>
   <div class="overlay-text">正在连接 <span id="overlayHost"></span>...</div>
@@ -83,7 +89,6 @@
 <script src="/app.js"></script>
 
 <script>
-// 预填地址 + 连接逻辑 (不依赖 app.js)
 (function(){
   var h = window.location.host;
   var ipEl = document.getElementById('overlayIP');
@@ -91,20 +96,15 @@
   if (ipEl) ipEl.value = h;
   if (hostEl) hostEl.textContent = h;
 })();
-
-// 自包含连接函数
 function connectOverlay() {
   var ip = document.getElementById('overlayIP').value.trim();
   if (!ip) { alert('请输入 IP 地址'); return; }
   localStorage.setItem('lazyDesk_host', ip);
-  if (typeof connect === 'function') {
-    connect();
-  } else if (typeof wsClient !== 'undefined') {
+  if (typeof connect === 'function') connect();
+  else if (typeof wsClient !== 'undefined') {
     if (typeof pc !== 'undefined' && pc) { pc.close(); pc = null; }
     wsClient.connect(ip);
-  } else {
-    alert('脚本加载失败，请刷新页面');
-  }
+  } else alert('脚本加载失败，请刷新页面');
 }
 </script>
 </body>
