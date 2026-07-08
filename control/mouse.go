@@ -8,24 +8,13 @@ import (
 )
 
 var (
-	user32                       = syscall.NewLazyDLL("user32.dll")
-	procSetCursorPos             = user32.NewProc("SetCursorPos")
-	procGetSystemMetrics         = user32.NewProc("GetSystemMetrics")
-	procMouseEvent               = user32.NewProc("mouse_event")
-	procSendInput                = user32.NewProc("SendInput")
-	procGetMessageExtraInfo      = user32.NewProc("GetMessageExtraInfo")
-	procMapVirtualKeyW           = user32.NewProc("MapVirtualKeyW")
-	procVkKeyScanW               = user32.NewProc("VkKeyScanW")
-	procOpenClipboard            = user32.NewProc("OpenClipboard")
-	procEmptyClipboard           = user32.NewProc("EmptyClipboard")
-	procSetClipboardData         = user32.NewProc("SetClipboardData")
-	procCloseClipboard           = user32.NewProc("CloseClipboard")
-	procGlobalAlloc              = user32.NewProc("GlobalAlloc")
-	procGlobalLock               = user32.NewProc("GlobalLock")
-	procGlobalUnlock             = user32.NewProc("GlobalUnlock")
-
-	kernel32              = syscall.NewLazyDLL("kernel32.dll")
-	procMultiByteToWideChar = kernel32.NewProc("MultiByteToWideChar")
+	user32               = syscall.NewLazyDLL("user32.dll")
+	procSetCursorPos     = user32.NewProc("SetCursorPos")
+	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
+	procMouseEvent       = user32.NewProc("mouse_event")
+	procSendInput        = user32.NewProc("SendInput")
+	procMapVirtualKeyW   = user32.NewProc("MapVirtualKeyW")
+	procVkKeyScanW       = user32.NewProc("VkKeyScanW")
 )
 
 const (
@@ -36,7 +25,6 @@ const (
 	MOUSEEVENTF_RIGHTUP    = 0x0010
 	MOUSEEVENTF_MIDDLEDOWN = 0x0020
 	MOUSEEVENTF_MIDDLEUP   = 0x0040
-	MOUSEEVENTF_ABSOLUTE   = 0x8000
 	MOUSEEVENTF_WHEEL      = 0x0800
 
 	WHEEL_DELTA = 120
@@ -44,13 +32,10 @@ const (
 	SM_CXSCREEN = 0
 	SM_CYSCREEN = 1
 
-	KEYEVENTF_KEYDOWN = 0x0000
-	KEYEVENTF_KEYUP   = 0x0002
+	KEYEVENTF_KEYUP    = 0x0002
 	KEYEVENTF_SCANCODE = 0x0008
 
 	INPUT_KEYBOARD = 1
-
-	CP_UTF8 = 65001
 )
 
 // keyInput Windows INPUT 结构体 (键盘)
