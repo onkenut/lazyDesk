@@ -42,7 +42,11 @@
   function showError(msg) {
     console.error(msg);
     if (overlay) overlay.style.display = 'flex';
-    if (overlayText) overlayText.textContent = msg;
+    if (overlayText) {
+      // 保留 span，只替换文本节点，不破坏 overlayHost 子元素
+      while (overlayText.firstChild) overlayText.removeChild(overlayText.firstChild);
+      overlayText.appendChild(document.createTextNode(msg));
+    }
     if (statusText) statusText.textContent = '连接失败';
     if (statusDot) statusDot.className = 'disconnected';
   }
@@ -66,6 +70,10 @@
         if (overlayText) overlayText.textContent = '连接断开';
         break;
     }
+    // N7: 重连时通知 controls.js 重置修饰键状态
+    if (typeof onConnectionStatusChange === 'function') {
+      onConnectionStatusChange(status);
+    }
   };
 
   window.connect = function() {
@@ -80,7 +88,7 @@
     wsClient.connect(host);
   };
 
-  setTimeout(function() { if (!connected) window.connect(); }, 400);
+  setTimeout(function() { if (!connected) window.connect(); }, 200); // I6: 减少重连延迟
 
   // 状态栏闲置淡出
   var statusBar = document.getElementById('statusBar'), idleTimer;

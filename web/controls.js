@@ -3,6 +3,14 @@
   // ====== 修饰键状态切换 ======
   const modKeys = {};
 
+  // N7: 重连时重置所有修饰键状态
+  window.onConnectionStatusChange = function(status) {
+    if (status === 'connected') {
+      Object.keys(modKeys).forEach(k => { modKeys[k] = false; });
+      document.querySelectorAll('.mod-key').forEach(b => b.classList.remove('active'));
+    }
+  };
+
   document.querySelectorAll('.mod-key').forEach(btn => {
     const key = btn.dataset.key;
     modKeys[key] = false;
@@ -66,7 +74,7 @@
     // 同步更新切换按钮图标
     const toggleBtn = document.getElementById('togglePanelBtn');
     if (toggleBtn) {
-      toggleBtn.textContent = panelVisible ? '⌨' : '⌨';
+      toggleBtn.textContent = panelVisible ? '▼' : '⌨';
       toggleBtn.style.opacity = panelVisible ? '1' : '0.5';
     }
     // 隐藏/显示文字输入

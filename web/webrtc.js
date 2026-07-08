@@ -15,6 +15,16 @@ function startWebRTC() {
     return;
   }
 
+  // 先清理旧的 PeerConnection (断线重连场景)
+  if (window.pc) {
+    try { window.pc.close(); } catch(e) {}
+    window.pc = null;
+  }
+  videoReady = false;
+  remoteDescSet = false;
+  iceBuffer = [];
+  if (drawRAF) { cancelAnimationFrame(drawRAF); drawRAF = null; }
+
   var video = document.getElementById('remoteVideo');
   var canvas = document.getElementById('remoteCanvas');
   if (!video || !canvas) return;
@@ -70,7 +80,9 @@ function startWebRTC() {
   pc.oniceconnectionstatechange = function() { console.log('ICE:', pc.iceConnectionState); };
   pc.onsignalingstatechange = function() { console.log('Signaling:', pc.signalingState); };
 
-  pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: true })
+  // 使用 addTransceiver (替代过时的 offerToReceiveVideo)
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.createOffer()
     .then(function(offer) {
       console.log('Offer, video:', /m=video/.test(offer.sdp));
       return pc.setLocalDescription(offer);
@@ -80,6 +92,8 @@ function startWebRTC() {
 }
 
 // ====== canvas 渲染循环 ======
+var _resizeHandler = null;
+
 function startCanvasRender(video, canvas) {
   if (drawRAF) cancelAnimationFrame(drawRAF);
   var ctx = canvas.getContext('2d');
@@ -91,6 +105,10 @@ function startCanvasRender(video, canvas) {
     canvas.style.height = '100vh';
   }
   resize();
+
+  // 防止断线重连时事件监听堆积
+  if (_resizeHandler) window.removeEventListener('resize', _resizeHandler);
+  _resizeHandler = resize;
   window.addEventListener('resize', resize);
 
   function draw() {

@@ -114,6 +114,9 @@ func (h *Handler) MouseScroll(deltaY int) {
 	if steps < 0 {
 		steps = -steps
 	}
+	if steps > 100 {
+		steps = 100 // B5: 防止大值冻结系统
+	}
 
 	for i := 0; i < steps; i++ {
 		if deltaY > 0 {

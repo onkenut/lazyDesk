@@ -4,7 +4,9 @@
   var canvas = document.getElementById('remoteCanvas');
   if (!layer) return;
 
-  var sx=0, sy=0, st=0, dragging=false, longTimer=null, LONG=500;
+  var sx=0, sy=0, st=0, dragging=false, isTwoFinger=false, longTimer=null, LONG=500;
+  var lastMove=0, MOVE_THROTTLE=16; // I1: touchmove 节流 ~60fps
+  var lastScroll=0, SCROLL_THROTTLE=50; // 双指滚动节流
 
   // ====== 禁止浏览器手势 ======
   document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
@@ -40,14 +42,20 @@
     var t=e.touches[0], r=videoRatio(t.clientX, t.clientY);
     sx=r.x; sy=r.y; st=Date.now(); dragging=false;
     if(e.touches.length===1){
+      isTwoFinger=false;
       wsClient.send({type:'mouse_move',x:r.x,y:r.y});
       longTimer=setTimeout(function(){
         wsClient.send({type:'mouse_click',button:'right',action:'click'});
       },LONG);
-    }else clearTimeout(longTimer);
+    }else{ isTwoFinger=true; clearTimeout(longTimer); }
   }
   function onMove(e) {
     e.preventDefault();
+    // I1: 节流 — 最多每 16ms 处理一次
+    var now = Date.now();
+    if (now - lastMove < MOVE_THROTTLE) return;
+    lastMove = now;
+
     if(e.touches.length===1){
       var r=videoRatio(e.touches[0].clientX, e.touches[0].clientY);
       if(!dragging && (Math.abs(r.x-sx)>0.005||Math.abs(r.y-sy)>0.005)){
@@ -59,15 +67,17 @@
       var r1=videoRatio(e.touches[0].clientX, e.touches[0].clientY);
       var r2=videoRatio(e.touches[1].clientX, e.touches[1].clientY);
       var cy=(r1.y+r2.y)/2;
-      if(Math.abs(cy-sy)>0.008){ wsClient.send({type:'mouse_scroll',deltaY:cy>sy?10:-10}); sy=cy; }
+      // I5: 增大阈值防方向抖动
+      if(Math.abs(cy-sy)>0.015){ wsClient.send({type:'mouse_scroll',deltaY:cy>sy?10:-10}); sy=cy; }
     }
   }
   function onEnd(e) {
     e.preventDefault(); clearTimeout(longTimer);
-    if(!dragging && e.changedTouches.length===1 && Date.now()-st<LONG){
+    // 双指操作结束后不触发点击
+    if(!dragging && !isTwoFinger && e.changedTouches.length===1 && Date.now()-st<LONG){
       wsClient.send({type:'mouse_click',button:'left',action:'click'});
     }
-    dragging=false;
+    if(e.touches.length===0){ isTwoFinger=false; dragging=false; }
   }
 
   layer.addEventListener('touchstart', onStart, {passive:false});

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/onkenut/lazyDesk/control"
@@ -37,6 +40,7 @@ type Handler struct {
 	capture    *ffmpeg.Capture
 	cmdHandler *control.Handler
 	upgrader   websocket.Upgrader
+	connCount  int32 // 活跃连接数 (引用计数)
 }
 
 // NewHandler 创建 WebSocket 处理器
@@ -60,15 +64,40 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	defer conn.Close()
+
+	var connClosed sync.Once
+	closeConn := func() { connClosed.Do(func() { conn.Close() }) }
+	defer closeConn()
 
 	log.Printf("WebSocket client connected: %s", r.RemoteAddr)
+
+	// N6: per-connection writeMu — 不同连接互不阻塞
+	writeMu := &sync.Mutex{}
+	sendJSON := func(msg map[string]interface{}) {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			log.Printf("JSON marshal error: %v", err)
+			return
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Printf("WebSocket write error: %v", err)
+		}
+	}
+	sendError := func(code, message string) {
+		sendJSON(map[string]interface{}{
+			"type":    "error",
+			"code":    code,
+			"message": message,
+		})
+	}
 
 	// 创建 PeerConnection (每个连接一个)
 	pc, err := h.rtcManager.CreatePeerConnection()
 	if err != nil {
 		log.Printf("Failed to create PeerConnection: %v", err)
-		h.sendError(conn, "peer_connection_failed", err.Error())
+		sendError("peer_connection_failed", err.Error())
 		return
 	}
 	defer func() {
@@ -77,18 +106,83 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 启动 ffmpeg 捕获
-	if !h.capture.IsRunning() {
-		if err := h.capture.Start(); err != nil {
-			log.Printf("Failed to start capture: %v", err)
-			h.sendError(conn, "capture_failed", err.Error())
+	// 启动 ffmpeg 捕获 (引用计数 — 延迟到 WebRTC ready 后)
+	// ARCH-2: 不在 WS 握手时 Start，避免 ffmpeg 帧撑爆 Pion 缓冲
+	atomic.AddInt32(&h.connCount, 1)
+	captureStarted := false
+	startCapture := func() {
+		if captureStarted {
 			return
 		}
-		defer h.capture.Stop()
+		if !h.capture.IsRunning() {
+			if err := h.capture.Start(); err != nil {
+				log.Printf("Failed to start capture: %v", err)
+				sendError("capture_failed", err.Error())
+				return
+			}
+		}
+		captureStarted = true
 	}
+	defer func() {
+		if atomic.AddInt32(&h.connCount, -1) == 0 {
+			h.capture.Stop()
+		}
+	}()
 
 	// 发送就绪信号
-	h.sendJSON(conn, map[string]interface{}{"type": "server_ready"})
+	sendJSON(map[string]interface{}{"type": "server_ready"})
+
+	// WebRTC Offer 处理
+	handleOffer := func(cmd *Command) {
+		offer := pionwebrtc.SessionDescription{
+			Type: pionwebrtc.SDPTypeOffer,
+			SDP:  cmd.SDP,
+		}
+
+		if err := pc.SetRemoteDescription(offer); err != nil {
+			log.Printf("SetRemoteDescription failed: %v", err)
+			sendError("set_remote_failed", err.Error())
+			return
+		}
+
+		answer, err := pc.CreateAnswer(nil)
+		if err != nil {
+			log.Printf("CreateAnswer failed: %v", err)
+			sendError("create_answer_failed", err.Error())
+			return
+		}
+
+		if err := pc.SetLocalDescription(answer); err != nil {
+			log.Printf("SetLocalDescription failed: %v", err)
+			sendError("set_local_failed", err.Error())
+			return
+		}
+
+		// 发送 Answer 给客户端
+		sendJSON(map[string]interface{}{
+			"type": "answer",
+			"sdp":  answer.SDP,
+		})
+	}
+
+	// ICE candidate 处理
+	handleCandidate := func(cmd *Command) {
+		candidate := pionwebrtc.ICECandidateInit{
+			Candidate: cmd.Candidate,
+		}
+		// B6: 必须做栈上副本，Pion 异步读取指针，不能让 cmd 复用后覆盖
+		if cmd.SdpMid != "" {
+			mid := cmd.SdpMid
+			candidate.SDPMid = &mid
+		}
+		if cmd.SdpMLineIndex != nil {
+			idx := *cmd.SdpMLineIndex
+			candidate.SDPMLineIndex = &idx
+		}
+		if err := pc.AddICECandidate(candidate); err != nil {
+			log.Printf("AddICECandidate failed: %v", err)
+		}
+	}
 
 	// ICE candidate → 转发给客户端
 	pc.OnICECandidate(func(candidate *pionwebrtc.ICECandidate) {
@@ -96,7 +190,7 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		candidateJSON := candidate.ToJSON()
-		h.sendJSON(conn, map[string]interface{}{
+		sendJSON(map[string]interface{}{
 			"type":          "candidate",
 			"candidate":     candidateJSON.Candidate,
 			"sdpMid":        candidateJSON.SDPMid,
@@ -108,15 +202,19 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	pc.OnConnectionStateChange(func(state pionwebrtc.PeerConnectionState) {
 		log.Printf("WebRTC state: %s", state.String())
 		switch state {
+		case pionwebrtc.PeerConnectionStateConnected:
+			// ARCH-2: WebRTC 就绪后才启动 ffmpeg 捕获
+			startCapture()
 		case pionwebrtc.PeerConnectionStateFailed,
 			pionwebrtc.PeerConnectionStateDisconnected,
 			pionwebrtc.PeerConnectionStateClosed:
-			conn.Close()
+			closeConn()
 		}
 	})
 
-	// 主消息循环
+	// 主消息循环 — I3: 60s 读超时防 goroutine 泄漏
 	for {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -131,111 +229,36 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		h.handleCommand(&cmd, pc, conn)
+		switch cmd.Type {
+
+		// ===== WebRTC 信令 =====
+		case "offer":
+			handleOffer(&cmd)
+		case "candidate":
+			handleCandidate(&cmd)
+
+		// ===== 鼠标 =====
+		case "mouse_move":
+			h.cmdHandler.MouseMove(cmd.X, cmd.Y)
+		case "mouse_click":
+			h.cmdHandler.MouseClick(cmd.Button, cmd.Action)
+		case "mouse_scroll":
+			h.cmdHandler.MouseScroll(cmd.DeltaY)
+
+		// ===== 键盘 =====
+		case "key_press":
+			h.cmdHandler.KeyPress(cmd.Key, cmd.Action)
+		case "key_combo":
+			h.cmdHandler.KeyCombo(cmd.Keys)
+		case "text_input":
+			h.cmdHandler.TextInput(cmd.Text)
+
+		// ===== 电源 =====
+		case "power":
+			h.cmdHandler.PowerAction(cmd.Action)
+
+		default:
+			log.Printf("Unknown command: %s", cmd.Type)
+		}
 	}
-}
-
-// handleCommand 路由控制指令
-func (h *Handler) handleCommand(cmd *Command, pc *pionwebrtc.PeerConnection, conn *websocket.Conn) {
-	switch cmd.Type {
-
-	// ===== WebRTC 信令 =====
-	case "offer":
-		h.handleOffer(cmd, pc, conn)
-	case "candidate":
-		h.handleCandidate(cmd, pc)
-
-	// ===== 鼠标 =====
-	case "mouse_move":
-		h.cmdHandler.MouseMove(cmd.X, cmd.Y)
-	case "mouse_click":
-		h.cmdHandler.MouseClick(cmd.Button, cmd.Action)
-	case "mouse_scroll":
-		h.cmdHandler.MouseScroll(cmd.DeltaY)
-
-	// ===== 键盘 =====
-	case "key_press":
-		h.cmdHandler.KeyPress(cmd.Key, cmd.Action)
-	case "key_combo":
-		h.cmdHandler.KeyCombo(cmd.Keys)
-	case "text_input":
-		h.cmdHandler.TextInput(cmd.Text)
-
-	// ===== 电源 =====
-	case "power":
-		h.cmdHandler.PowerAction(cmd.Action)
-
-	default:
-		log.Printf("Unknown command: %s", cmd.Type)
-	}
-}
-
-// handleOffer 处理 WebRTC Offer → 创建 Answer
-func (h *Handler) handleOffer(cmd *Command, pc *pionwebrtc.PeerConnection, conn *websocket.Conn) {
-	offer := pionwebrtc.SessionDescription{
-		Type: pionwebrtc.SDPTypeOffer,
-		SDP:  cmd.SDP,
-	}
-
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		log.Printf("SetRemoteDescription failed: %v", err)
-		h.sendError(conn, "set_remote_failed", err.Error())
-		return
-	}
-
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		log.Printf("CreateAnswer failed: %v", err)
-		h.sendError(conn, "create_answer_failed", err.Error())
-		return
-	}
-
-	if err := pc.SetLocalDescription(answer); err != nil {
-		log.Printf("SetLocalDescription failed: %v", err)
-		h.sendError(conn, "set_local_failed", err.Error())
-		return
-	}
-
-	// 发送 Answer 给客户端
-	h.sendJSON(conn, map[string]interface{}{
-		"type": "answer",
-		"sdp":  answer.SDP,
-	})
-}
-
-// handleCandidate 处理 ICE 候选
-func (h *Handler) handleCandidate(cmd *Command, pc *pionwebrtc.PeerConnection) {
-	candidate := pionwebrtc.ICECandidateInit{
-		Candidate: cmd.Candidate,
-	}
-	if cmd.SdpMid != "" {
-		candidate.SDPMid = &cmd.SdpMid
-	}
-	if cmd.SdpMLineIndex != nil {
-		candidate.SDPMLineIndex = cmd.SdpMLineIndex
-	}
-	if err := pc.AddICECandidate(candidate); err != nil {
-		log.Printf("AddICECandidate failed: %v", err)
-	}
-}
-
-// sendJSON 发送 JSON 消息
-func (h *Handler) sendJSON(conn *websocket.Conn, msg map[string]interface{}) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("JSON marshal error: %v", err)
-		return
-	}
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Printf("WebSocket write error: %v", err)
-	}
-}
-
-// sendError 发送错误消息
-func (h *Handler) sendError(conn *websocket.Conn, code, message string) {
-	h.sendJSON(conn, map[string]interface{}{
-		"type":    "error",
-		"code":    code,
-		"message": message,
-	})
 }

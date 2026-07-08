@@ -30,11 +30,74 @@ func (m *Manager) CreatePeerConnection() (*webrtc.PeerConnection, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{},
+	// N5: 先关闭旧 PeerConnection，防止引用泄漏
+	if m.peerConn != nil {
+		m.peerConn.Close()
+		m.peerConn = nil
+		m.videoTrack = nil
+		m.audioTrack = nil
 	}
 
-	pc, err := webrtc.NewPeerConnection(config)
+	// 仅注册 H264 + Opus，精确匹配浏览器 offer 的 payload type。
+	// 不能用 RegisterDefaultCodecs()——它带 VP8/VP9/AV1 会排在 H264 前面，
+	// 导致浏览器优先选 VP8，服务端发 H264 → 解码失败黑屏。
+	mediaEngine := &webrtc.MediaEngine{}
+
+	h264Profiles := []struct {
+		pt     webrtc.PayloadType
+		fmtp   string
+	}{
+		{103, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"},
+		{107, "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f"},
+		{109, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
+		{114, "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"},
+		{115, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f"},
+		{39, "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f"},
+		{40, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f"},
+	}
+	for _, p := range h264Profiles {
+		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:     webrtc.MimeTypeH264,
+				ClockRate:    90000,
+				SDPFmtpLine:  p.fmtp,
+				RTCPFeedback: []webrtc.RTCPFeedback{
+					{Type: "goog-remb"},
+					{Type: "ccm", Parameter: "fir"},
+					{Type: "nack"},
+					{Type: "nack", Parameter: "pli"},
+				},
+			},
+			PayloadType: p.pt,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return nil, err
+		}
+	}
+
+	// Opus 音频
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeOpus,
+			ClockRate: 48000,
+			Channels:  2,
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, err
+	}
+
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
+
+	// ICE 配置: 从 config.yaml 读取
+	iceServers := []webrtc.ICEServer{}
+	for _, url := range m.cfg.WebRTC.ICEServers {
+		iceServers = append(iceServers, webrtc.ICEServer{URLs: []string{url}})
+	}
+	config := webrtc.Configuration{
+		ICEServers: iceServers,
+	}
+
+	pc, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}
