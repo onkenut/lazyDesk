@@ -96,18 +96,14 @@
 function connectOverlay() {
   var ip = document.getElementById('overlayIP').value.trim();
   if (!ip) { alert('请输入 IP 地址'); return; }
-  document.getElementById('serverIP').value = ip;
   localStorage.setItem('lazyDesk_host', ip);
   if (typeof connect === 'function') {
     connect();
+  } else if (typeof wsClient !== 'undefined') {
+    if (typeof pc !== 'undefined' && pc) { pc.close(); pc = null; }
+    wsClient.connect(ip);
   } else {
-    // fallback: 直接调 wsClient (ws.js 定义的全局)
-    if (typeof wsClient !== 'undefined') {
-      if (typeof pc !== 'undefined' && pc) { pc.close(); pc = null; }
-      wsClient.connect(ip);
-    } else {
-      alert('脚本加载失败，请刷新页面');
-    }
+    alert('脚本加载失败，请刷新页面');
   }
 }
 </script>
