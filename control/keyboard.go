@@ -9,7 +9,7 @@ import (
 	"unsafe"
 )
 
-// KeyPress 单键按下/释放 (使用 Windows SendInput API)
+// KeyPress 单键按下/释放/点击 (使用 Windows SendInput API)
 func (h *Handler) KeyPress(key string, action string) {
 	vk := keyNameToVK(key)
 	if vk == 0 {
@@ -18,16 +18,26 @@ func (h *Handler) KeyPress(key string, action string) {
 
 	scanCode, _, _ := procMapVirtualKeyW.Call(uintptr(vk), 0)
 
+	// "tap" = 按下后立即释放 (用于功能键)
+	if action == "tap" {
+		h.sendKeyEvent(uint16(scanCode), KEYEVENTF_SCANCODE)
+		h.sendKeyEvent(uint16(scanCode), KEYEVENTF_SCANCODE|KEYEVENTF_KEYUP)
+		return
+	}
+
 	flags := uint32(KEYEVENTF_SCANCODE)
 	if action == "up" {
 		flags |= KEYEVENTF_KEYUP
 	}
+	h.sendKeyEvent(uint16(scanCode), flags)
+}
 
+// sendKeyEvent 发送单个键盘事件
+func (h *Handler) sendKeyEvent(scanCode uint16, flags uint32) {
 	inputs := [1]keyInput{}
 	inputs[0].Type = INPUT_KEYBOARD
-	inputs[0].Ki.WScan = uint16(scanCode)
+	inputs[0].Ki.WScan = scanCode
 	inputs[0].Ki.DwFlags = flags
-
 	size := unsafe.Sizeof(keyInput{})
 	procSendInput.Call(1, uintptr(unsafe.Pointer(&inputs[0])), size)
 }

@@ -99,19 +99,30 @@ func (h *Handler) MouseClick(button string, action string) {
 	}
 }
 
-// MouseScroll 鼠标滚轮
+// MouseScroll 鼠标滚轮 (deltaY 为滚轮步数，正=上滚，负=下滚)
 func (h *Handler) MouseScroll(deltaY int) {
 	if deltaY == 0 {
 		return
 	}
-	// mouse_event 需要 dwData 参数
+
+	// 每次 mouse_event 发送一个滚轮刻度 (WHEEL_DELTA = 120)
+	// 多次调用以支持滚动多格
+	var flags uintptr = MOUSEEVENTF_WHEEL
 	var dwData uintptr
-	if deltaY > 0 {
-		dwData = uintptr(WHEEL_DELTA)
-	} else {
-		dwData = uintptr(^uint32(WHEEL_DELTA-1)) // 负数用补码
+
+	steps := deltaY
+	if steps < 0 {
+		steps = -steps
 	}
-	procMouseEvent.Call(uintptr(MOUSEEVENTF_WHEEL), 0, 0, dwData, 0)
+
+	for i := 0; i < steps; i++ {
+		if deltaY > 0 {
+			dwData = WHEEL_DELTA
+		} else {
+			dwData = uintptr(^uint32(WHEEL_DELTA - 1)) // 补码表示 -120
+		}
+		procMouseEvent.Call(flags, 0, 0, dwData, 0)
+	}
 }
 
 // MouseDrag 鼠标拖拽
@@ -166,9 +177,13 @@ func keyNameToVK(key string) uint16 {
 		return vk
 	}
 
-	// 单个字母/数字字符
+	// 单个字母/数字字符 — 必须大写，因为 Windows VK 码与大写字母一致
 	if len(key) == 1 {
-		return uint16(key[0])
+		ch := key[0]
+		if ch >= 'a' && ch <= 'z' {
+			ch -= 32 // 转大写
+		}
+		return uint16(ch)
 	}
 
 	log.Printf("Unknown key: %s", key)

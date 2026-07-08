@@ -1,8 +1,6 @@
-# lazyDesk .gitignore
-
-# 二进制文件
+# 编译产物
 lazyDesk.exe
-lazyDesk
+*.exe
 
 # IDE
 .idea/
@@ -16,9 +14,7 @@ lazyDesk
 Thumbs.db
 
 # Go
-*.exe
-*.test
-*.out
+vendor/
 
-# 本地配置覆盖 (不要提交个人配置)
+# 配置文件(本地覆盖)
 config.local.yaml
