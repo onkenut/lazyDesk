@@ -21,6 +21,8 @@ import (
 var webFS embed.FS
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 	// 1. 加载配置
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
@@ -32,6 +34,9 @@ func main() {
 	rtcManager := webrtc.NewManager(cfg)
 	cmdHandler := control.NewHandler(cfg)
 
+	// 将 WebRTC Manager 注册为 capture 的视频输出
+	capture.SetVideoTrack(rtcManager)
+
 	// 3. 创建 WebSocket 信令处理器
 	wsHandler := websocket.NewHandler(rtcManager, capture, cmdHandler)
 
@@ -40,12 +45,16 @@ func main() {
 	mux.HandleFunc("/ws", wsHandler.HandleWebSocket)
 
 	// 托管前端静态文件 (从 embed.FS)
-	webSubFS, _ := fs.Sub(webFS, "web")
+	webSubFS, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatalf("Failed to create web sub-fs: %v", err)
+	}
 	mux.Handle("/", http.FileServer(http.FS(webSubFS)))
 
 	// 5. 启动 HTTP 服务
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("lazyDesk server starting on http://%s", addr)
+	log.Printf("Open http://localhost:%d on your tablet browser", cfg.Server.Port)
 
 	go func() {
 		if err := http.ListenAndServe(addr, mux); err != nil {
@@ -60,4 +69,5 @@ func main() {
 
 	log.Println("Shutting down...")
 	capture.Stop()
+	rtcManager.Close()
 }
