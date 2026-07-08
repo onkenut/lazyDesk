@@ -1,4 +1,4 @@
-/* ====== 全局重置 — 禁用所有浏览器原生行为 ====== */
+/* ====== 全局重置 ====== */
 * {
   -webkit-user-select: none;
   -moz-user-select: none;
@@ -10,63 +10,104 @@
 }
 
 html, body {
-  margin: 0;
-  padding: 0;
+  margin: 0; padding: 0;
   overflow: hidden;
   overscroll-behavior: none;
   position: fixed;
-  width: 100%;
-  height: 100%;
+  width: 100%; height: 100%;
   background: #000;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* ====== z-0: 视频层 (纯展示，不响应事件) ====== */
+/* ====== z-0: 视频层 ====== */
 #remoteVideo {
   pointer-events: none;
   position: fixed;
   top: 0; left: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100vw; height: 100vh;
   object-fit: contain;
   z-index: 0;
   background: #111;
 }
 
-/* ====== z-10: 触控覆盖层 (透明，拦截所有手势) ====== */
+/* ====== z-10: 触控覆盖层 ====== */
 #touchLayer {
   position: fixed;
   top: 0; left: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100vw; height: 100vh;
   z-index: 10;
-  touch-action: none; /* 禁止浏览器手势识别 */
+  touch-action: none;
   cursor: none;
 }
 
-/* ====== z-20: 虚拟按键面板 ====== */
-#controlPanel {
+/* ====== z-50: 连接遮罩层 ====== */
+#connectOverlay {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 20;
-  background: rgba(20, 20, 30, 0.92);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  padding: 8px 10px;
-  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 50;
+  background: rgba(10, 10, 20, 0.95);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  border-top: 1px solid rgba(255,255,255,0.1);
-  transition: transform 0.3s ease;
-  max-height: 45vh;
-  overflow-y: auto;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: #ccc;
 }
 
-#controlPanel.hidden {
-  transform: translateY(100%);
+.overlay-logo {
+  font-size: 48px;
+  margin-bottom: 8px;
+}
+
+.overlay-text {
+  font-size: 18px;
+  color: #aaa;
+  margin-bottom: 8px;
+}
+
+.overlay-form {
+  display: flex;
+  gap: 10px;
+}
+
+.overlay-form input {
+  font-size: 18px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  border: 2px solid #444;
+  background: #1a1a2e;
+  color: #fff;
+  text-align: center;
+  width: 240px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.overlay-form input:focus {
+  border-color: #5a7aff;
+}
+
+.overlay-form button {
+  font-size: 18px;
+  padding: 14px 28px;
+  border-radius: 12px;
+  border: none;
+  background: #4a9;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.overlay-form button:active {
+  background: #3a8;
+  transform: scale(0.96);
+}
+
+.overlay-hint {
+  font-size: 13px;
+  color: #666;
+  margin-top: 8px;
 }
 
 /* ====== z-30: 状态栏 ====== */
@@ -88,23 +129,79 @@ html, body {
   transition: opacity 0.5s ease;
 }
 
-#statusBar.idle {
-  opacity: 0.3;
-}
+#statusBar.idle { opacity: 0.3; }
 
 #statusDot {
-  width: 8px;
-  height: 8px;
+  width: 8px; height: 8px;
   border-radius: 50%;
   background: #f90;
 }
 #statusDot.connected { background: #4a9; }
 #statusDot.disconnected { background: #e44; }
 
+/* ====== z-40: 浮动按钮 ====== */
+#togglePanelBtn, #keyboardBtn {
+  position: fixed;
+  z-index: 40;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(30, 30, 50, 0.85);
+  color: #ccc;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: background 0.2s, transform 0.1s;
+}
+
+#togglePanelBtn {
+  right: 14px;
+  bottom: 140px;
+}
+
+#keyboardBtn {
+  right: 14px;
+  bottom: 196px;
+}
+
+#togglePanelBtn:active, #keyboardBtn:active {
+  background: rgba(80, 80, 120, 0.9);
+  transform: scale(0.9);
+}
+
+/* ====== z-20: 虚拟按键面板 ====== */
+#controlPanel {
+  position: fixed;
+  bottom: 0;
+  left: 0; right: 0;
+  z-index: 20;
+  background: rgba(15, 15, 25, 0.93);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 8px 10px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  transition: transform 0.25s ease;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+#controlPanel.hidden {
+  transform: translateY(calc(100% + 20px));
+}
+
 /* ====== 按键样式 ====== */
 .key-row {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 
@@ -112,24 +209,22 @@ button {
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  padding: 8px 12px;
-  min-width: 40px;
+  padding: 7px 10px;
+  min-width: 36px;
   text-align: center;
   transition: background 0.15s, transform 0.1s;
   touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
 }
 
-button:active {
-  transform: scale(0.93);
-}
+button:active { transform: scale(0.92); }
 
 .mod-key {
-  background: #3a3a4a;
-  color: #ccc;
+  background: #2a2a3a;
+  color: #bbb;
   flex: 1;
+  font-size: 14px;
 }
 .mod-key.active {
   background: #5a7aff;
@@ -137,67 +232,41 @@ button:active {
 }
 
 .fn-key {
-  background: #2a2a35;
+  background: #222230;
   color: #ddd;
   flex: 1;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .macro-key {
-  background: #3d3040;
-  color: #e0c0f0;
+  background: #2d2035;
+  color: #d0b0e0;
   flex: 1;
   font-size: 12px;
 }
 
 .power-key {
-  background: #2a3040;
-  color: #8ac;
+  background: #1e2a35;
+  color: #7ab;
   flex: 1;
   font-size: 12px;
 }
 .power-key.danger {
-  background: #402020;
-  color: #e88;
+  background: #351a1a;
+  color: #e66;
 }
 
-/* 输入框样式 */
-#textInput::placeholder {
-  color: #666;
+/* 文字输入 */
+#textInput {
+  flex: 1;
+  background: #1a1a28;
+  color: #eee;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 14px;
+  outline: none;
+  min-width: 0;
 }
-
-/* ====== 连接提示遮罩 ====== */
-#connectOverlay {
-  position: fixed;
-  top: 0; left: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: 50;
-  background: rgba(0,0,0,0.85);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 20px;
-  color: #ccc;
-  font-size: 18px;
-}
-
-#connectOverlay input {
-  font-size: 20px;
-  padding: 12px 16px;
-  border-radius: 10px;
-  border: 1px solid #555;
-  background: #222;
-  color: #fff;
-  text-align: center;
-  width: 260px;
-}
-
-#connectOverlay button {
-  font-size: 18px;
-  padding: 12px 32px;
-  background: #4a9;
-  color: #fff;
-  border-radius: 10px;
-}
+#textInput::placeholder { color: #555; }
+#textInput:focus { border-color: #5a7aff; }

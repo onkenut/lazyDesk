@@ -1,11 +1,13 @@
-// app.js — 应用主入口 (连接管理 + 状态显示 + 事件路由)
+// app.js — 应用主入口 (连接管理 + 状态显示)
 (function() {
   const statusDot = document.getElementById('statusDot');
   const statusText = document.getElementById('statusText');
   const serverIP = document.getElementById('serverIP');
-  const remoteVideo = document.getElementById('remoteVideo');
+  const connectOverlay = document.getElementById('connectOverlay');
 
-  // 默认读取 localStorage 保存的服务器地址
+  let connected = false;
+
+  // 加载本地存储
   const savedHost = localStorage.getItem('lazyDesk_host');
   if (savedHost) {
     serverIP.value = savedHost;
@@ -21,21 +23,40 @@
     }
   };
 
-  // ====== 连接状态更新 ======
+  // ====== server_ready → 启动 WebRTC ======
+  wsClient.onReady = () => {
+    console.log('Server ready, initiating WebRTC...');
+    if (typeof startWebRTC === 'function') {
+      startWebRTC();
+    }
+  };
+
+  // ====== 连接状态 ======
   wsClient.onStatusChange = (status) => {
     statusDot.className = status;
     switch (status) {
       case 'connecting':
         statusText.textContent = '连接中...';
+        if (connectOverlay) {
+          connectOverlay.querySelector('.overlay-text').textContent = '正在连接...';
+        }
         break;
       case 'connected':
         statusText.textContent = '已连接';
-        // 隐藏连接遮罩 (如果有)
-        const overlay = document.getElementById('connectOverlay');
-        if (overlay) overlay.style.display = 'none';
+        connected = true;
+        if (connectOverlay) {
+          connectOverlay.style.display = 'none';
+        }
         break;
       case 'disconnected':
         statusText.textContent = '已断开';
+        connected = false;
+        // 断线后显示连接界面
+        if (connectOverlay && wsClient.reconnectAttempts === 0) {
+          connectOverlay.style.display = 'flex';
+          connectOverlay.querySelector('.overlay-text').textContent = 
+            '连接断开，请重新输入 PC IP 地址';
+        }
         break;
     }
   };
@@ -43,13 +64,42 @@
   // ====== 连接按钮 ======
   window.connect = function() {
     const host = serverIP.value.trim();
-    if (!host) return;
+    if (!host) {
+      alert('请输入 PC 的 IP 地址和端口，例如: 192.168.1.100:8080');
+      return;
+    }
 
-    // 保存到 localStorage
     localStorage.setItem('lazyDesk_host', host);
-
+    
+    if (connectOverlay) {
+      connectOverlay.querySelector('.overlay-text').textContent = '正在连接...';
+    }
+    
+    // 重置 WebRTC (如果之前有连接)
+    if (window.pc) {
+      window.pc.close();
+      window.pc = null;
+    }
+    
     wsClient.connect(host);
   };
+
+  // ====== 回车连接 ======
+  serverIP.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      connect();
+    }
+  });
+
+  // ====== 自动连接 ======
+  if (savedHost) {
+    setTimeout(() => {
+      if (!connected) {
+        connect();
+      }
+    }, 800);
+  }
 
   // ====== 状态栏闲置后淡出 ======
   const statusBar = document.getElementById('statusBar');
@@ -67,20 +117,13 @@
   document.addEventListener('pointermove', resetIdleTimer);
   resetIdleTimer();
 
-  // ====== 首次用户点击页面时解除视频静音 (绕过 autoplay 策略) ======
+  // ====== 首次用户点击画面 → 解除视频静音 ======
   document.addEventListener('click', function unlockAudio() {
-    if (remoteVideo) {
-      remoteVideo.muted = false;
-      remoteVideo.play().catch(() => {});
+    const video = document.getElementById('remoteVideo');
+    if (video) {
+      video.muted = false;
+      video.play().catch(() => {});
     }
   }, { once: true });
-
-  // ====== 页面加载后自动连接 (如已保存地址) ======
-  if (savedHost) {
-    // 延迟一下等页面初始化完成
-    setTimeout(() => {
-      wsClient.connect(savedHost);
-    }, 500);
-  }
 
 })();
