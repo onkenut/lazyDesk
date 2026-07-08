@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -10,33 +11,36 @@ import (
 	"time"
 
 	"github.com/onkenut/lazyDesk/config"
-	"github.com/pion/webrtc/v4/pkg/media"
+	pmedia "github.com/pion/webrtc/v4/pkg/media"
 )
-
-// Capture 管理 ffmpeg 屏幕捕获子进程，输出 raw H264 Annex-B
-type Capture struct {
-	cfg          *config.Config
-	cmd          *exec.Cmd
-	stdout       io.ReadCloser
-	running      bool
-	mu           sync.Mutex
-	stopCh       chan struct{}
-	videoTrack   VideoWriter
-
-	// H264 解析状态
-	nalBuf       []byte // 正在累积的 NAL unit
-	startCodeLen int    // 当前 start code 长度 (3 or 4 bytes)
-	foundStart   bool
-	frameCount   int
-	startTime    time.Time
-}
 
 // VideoWriter is the interface for writing video samples to WebRTC tracks
 type VideoWriter interface {
-	WriteVideoSample(sample media.Sample) error
+	WriteVideoSample(sample pmedia.Sample) error
 }
 
-// NewCapture 创建新的捕获管理器
+// Capture manages ffmpeg screen capture + H264 NAL aggregation
+type Capture struct {
+	cfg        *config.Config
+	cmd        *exec.Cmd
+	stdout     io.ReadCloser
+	running    bool
+	mu         sync.Mutex
+	stopCh     chan struct{}
+	videoTrack VideoWriter
+
+	// H264 NAL aggregation state
+	nalBuf    []byte   // current NAL being accumulated
+	foundNal  bool
+	codeLen   int // start code length (3 or 4)
+
+	// Access unit aggregation
+	au        [][]byte // NALs in current access unit
+	hasSlice  bool
+	frameNum  int
+	startTime time.Time
+}
+
 func NewCapture(cfg *config.Config) *Capture {
 	return &Capture{
 		cfg:    cfg,
@@ -44,28 +48,18 @@ func NewCapture(cfg *config.Config) *Capture {
 	}
 }
 
-// SetVideoTrack 设置视频输出目标 (在 WebRTC track 创建后调用)
 func (c *Capture) SetVideoTrack(w VideoWriter) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.Lock(); defer c.mu.Unlock()
 	c.videoTrack = w
 }
 
-// Start 启动 ffmpeg 屏幕捕获子进程，输出 raw H264
 func (c *Capture) Start() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.Lock(); defer c.mu.Unlock()
+	if c.running { return fmt.Errorf("capture already running") }
 
-	if c.running {
-		return fmt.Errorf("capture already running")
-	}
+	ff := c.cfg.Ffmpeg.Path
+	if ff == "" { ff = "ffmpeg" }
 
-	ffmpegPath := c.cfg.Ffmpeg.Path
-	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
-	}
-
-	// Raw H264 Annex-B 输出: 屏幕→H264, 无音频, 输出到 stdout
 	args := []string{
 		"-f", "gdigrab",
 		"-framerate", fmt.Sprintf("%d", c.cfg.Ffmpeg.Screen.Framerate),
@@ -74,177 +68,155 @@ func (c *Capture) Start() error {
 		"-preset", c.cfg.Ffmpeg.Screen.Preset,
 		"-tune", c.cfg.Ffmpeg.Screen.Tune,
 		"-pix_fmt", c.cfg.Ffmpeg.Screen.PixFmt,
-		"-an",                     // 无音频
-		"-f", "h264",              // raw H264 Annex-B
+		"-an",
+		"-f", "h264",
 		"-",
 	}
 
-	cmd := exec.Command(ffmpegPath, args...)
+	cmd := exec.Command(ff, args...)
 	cmd.Stderr = log.Writer()
-
 	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
+	if err != nil { return fmt.Errorf("pipe: %w", err) }
 	c.stdout = stdout
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start ffmpeg: %w", err)
-	}
+	if err := cmd.Start(); err != nil { return fmt.Errorf("start: %w", err) }
 
 	c.cmd = cmd
 	c.running = true
 	c.startTime = time.Now()
-	c.startCodeLen = 4 // 默认 4-byte start code
+	c.codeLen = 4
 	c.nalBuf = make([]byte, 0, 128*1024)
-	c.frameCount = 0
+	c.au = nil
+	c.hasSlice = false
+	c.frameNum = 0
 
-	log.Printf("ffmpeg capture started (PID: %d)", cmd.Process.Pid)
-
+	log.Printf("ffmpeg started (PID: %d)", cmd.Process.Pid)
 	go c.readLoop()
-
 	return nil
 }
 
-// readLoop 从 ffmpeg stdout 读取 H264 Annex-B，解析 NAL units 并推送到 WebRTC
+var (
+	pattern3 = []byte{0x00, 0x00, 0x01}
+	pattern4 = []byte{0x00, 0x00, 0x00, 0x01}
+)
+
 func (c *Capture) readLoop() {
-	defer func() {
-		c.mu.Lock()
-		c.running = false
-		c.mu.Unlock()
-	}()
+	defer func() { c.mu.Lock(); c.running = false; c.mu.Unlock() }()
 
 	reader := bufio.NewReaderSize(c.stdout, 256*1024)
-
-	// 预分配大 buffer 用于读取
 	buf := make([]byte, 32768)
-
-	// start code 前缀 (3 or 4 bytes)
-	var prefix3 = []byte{0x00, 0x00, 0x01}
-	var prefix4 = []byte{0x00, 0x00, 0x00, 0x01}
 
 	for {
 		select {
-		case <-c.stopCh:
-			return
+		case <-c.stopCh: return
 		default:
 		}
-
 		n, err := reader.Read(buf)
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("ffmpeg read error: %v", err)
-			}
+			if err != io.EOF { log.Printf("ffmpeg read: %v", err) }
 			return
 		}
-
-		// 扫描数据中的 NAL start codes
-		c.scanNalUnits(buf[:n], prefix3, prefix4)
+		c.process(buf[:n])
 	}
 }
 
-// scanNalUnits 扫描字节流中的 H264 NAL start codes 并提取 NAL units
-func (c *Capture) scanNalUnits(data []byte, prefix3, prefix4 []byte) {
+// process scans for H264 start codes and aggregates NALs into access units
+func (c *Capture) process(data []byte) {
 	for i := 0; i < len(data); {
-		// 查找下一个 start code
-		idx3 := findPattern(data, prefix3, i)
-		idx4 := findPattern(data, prefix4, i)
+		i3 := index(data, pattern3, i)
+		i4 := index(data, pattern4, i)
 
-		var startIdx, newCodeLen int
+		var spos, clen int
 		switch {
-		case idx4 >= 0 && (idx3 < 0 || idx4 <= idx3):
-			startIdx = idx4
-			newCodeLen = 4
-		case idx3 >= 0:
-			startIdx = idx3
-			newCodeLen = 3
+		case i4 >= 0 && (i3 < 0 || i4 <= i3): spos, clen = i4, 4
+		case i3 >= 0: spos, clen = i3, 3
 		default:
-			// 没有找到新的 start code，将剩余数据追加到当前 NAL
+			// no more start codes, rest belongs to current NAL
 			c.nalBuf = append(c.nalBuf, data[i:]...)
 			return
 		}
 
-		// 在 startIdx 之前的数据属于当前 NAL unit 的尾部
-		if c.foundStart {
-			c.nalBuf = append(c.nalBuf, data[i:startIdx]...)
-			c.emitNalUnit(c.nalBuf)
+		// data[i:spos] is the tail of the current NAL
+		if c.foundNal {
+			c.nalBuf = append(c.nalBuf, data[i:spos]...)
+			c.onNalComplete(c.nalBuf, c.codeLen)
 		}
 
-		// 开始新的 NAL unit
-		c.nalBuf = make([]byte, 0, 128*1024)
-		c.nalBuf = append(c.nalBuf, data[startIdx:startIdx+newCodeLen]...)
-		c.startCodeLen = newCodeLen
-		c.foundStart = true
+		// start new NAL
+		c.nalBuf = append(c.nalBuf[:0], data[spos:spos+clen]...)
+		c.codeLen = clen
+		c.foundNal = true
 
-		// 移动到 start code 之后
-		i = startIdx + newCodeLen
+		i = spos + clen
 	}
 }
 
-// emitNalUnit 将完整 NAL unit 推送到 WebRTC track
-func (c *Capture) emitNalUnit(nalData []byte) {
+// onNalComplete processes a complete NAL unit, aggregating into access units
+func (c *Capture) onNalComplete(nal []byte, codeLen int) {
+	if codeLen >= len(nal) { return }
+	nalType := nal[codeLen] & 0x1F
+
+	// Is this a VCL NAL (slice data)?
+	isSlice := nalType == 1 || nalType == 5
+
+	// New access unit when: we see a slice NAL and already have slice data
+	if isSlice && c.hasSlice {
+		c.emitAU()
+		c.au = nil
+		c.hasSlice = false
+	}
+
+	c.au = append(c.au, append([]byte(nil), nal...))
+	if isSlice { c.hasSlice = true }
+}
+
+// emitAU sends a complete access unit to WebRTC
+func (c *Capture) emitAU() {
+	if len(c.au) == 0 { return }
+
 	c.mu.Lock()
 	track := c.videoTrack
 	c.mu.Unlock()
+	if track == nil { return }
 
-	if track == nil {
-		return
-	}
+	// Concatenate all NALs into one buffer
+	var total int
+	for _, n := range c.au { total += len(n) }
+	data := make([]byte, 0, total)
+	for _, n := range c.au { data = append(data, n...) }
 
-	// 计算时间戳
-	c.frameCount++
-
-	now := time.Now()
-	sample := media.Sample{
-		Data:      nalData,
-		Timestamp: now,
+	c.frameNum++
+	sample := pmedia.Sample{
+		Data:      data,
+		Timestamp: time.Now(),
 		Duration:  33 * time.Millisecond,
 	}
 
 	if err := track.WriteVideoSample(sample); err != nil {
-		log.Printf("Failed to write video sample: %v", err)
+		log.Printf("WriteSample error: %v", err)
 	}
 }
 
-// findPattern 在 data 中从 offset 开始查找 pattern
-func findPattern(data, pattern []byte, offset int) int {
-	for i := offset; i <= len(data)-len(pattern); i++ {
-		match := true
-		for j := 0; j < len(pattern); j++ {
-			if data[i+j] != pattern[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
+func index(data, pat []byte, off int) int {
+	end := len(data) - len(pat)
+	for i := off; i <= end; i++ {
+		if bytes.Equal(data[i:i+len(pat)], pat) { return i }
 	}
 	return -1
 }
 
-// Stop 停止 ffmpeg 子进程
 func (c *Capture) Stop() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.running {
-		return
-	}
-
+	c.mu.Lock(); defer c.mu.Unlock()
+	if !c.running { return }
 	close(c.stopCh)
-
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
-		log.Printf("ffmpeg capture stopped")
+		log.Printf("ffmpeg stopped")
 	}
-
 	c.running = false
 }
 
-// IsRunning 检查是否正在运行
 func (c *Capture) IsRunning() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.Lock(); defer c.mu.Unlock()
 	return c.running
 }
