@@ -1,0 +1,191 @@
+//go:build windows
+
+package control
+
+import (
+	"log"
+	"syscall"
+)
+
+var (
+	user32                       = syscall.NewLazyDLL("user32.dll")
+	procSetCursorPos             = user32.NewProc("SetCursorPos")
+	procGetSystemMetrics         = user32.NewProc("GetSystemMetrics")
+	procMouseEvent               = user32.NewProc("mouse_event")
+	procSendInput                = user32.NewProc("SendInput")
+	procGetMessageExtraInfo      = user32.NewProc("GetMessageExtraInfo")
+	procMapVirtualKeyW           = user32.NewProc("MapVirtualKeyW")
+	procVkKeyScanW               = user32.NewProc("VkKeyScanW")
+	procOpenClipboard            = user32.NewProc("OpenClipboard")
+	procEmptyClipboard           = user32.NewProc("EmptyClipboard")
+	procSetClipboardData         = user32.NewProc("SetClipboardData")
+	procCloseClipboard           = user32.NewProc("CloseClipboard")
+	procGlobalAlloc              = user32.NewProc("GlobalAlloc")
+	procGlobalLock               = user32.NewProc("GlobalLock")
+	procGlobalUnlock             = user32.NewProc("GlobalUnlock")
+
+	kernel32              = syscall.NewLazyDLL("kernel32.dll")
+	procMultiByteToWideChar = kernel32.NewProc("MultiByteToWideChar")
+)
+
+const (
+	MOUSEEVENTF_MOVE       = 0x0001
+	MOUSEEVENTF_LEFTDOWN   = 0x0002
+	MOUSEEVENTF_LEFTUP     = 0x0004
+	MOUSEEVENTF_RIGHTDOWN  = 0x0008
+	MOUSEEVENTF_RIGHTUP    = 0x0010
+	MOUSEEVENTF_MIDDLEDOWN = 0x0020
+	MOUSEEVENTF_MIDDLEUP   = 0x0040
+	MOUSEEVENTF_ABSOLUTE   = 0x8000
+	MOUSEEVENTF_WHEEL      = 0x0800
+
+	WHEEL_DELTA = 120
+
+	SM_CXSCREEN = 0
+	SM_CYSCREEN = 1
+
+	KEYEVENTF_KEYDOWN = 0x0000
+	KEYEVENTF_KEYUP   = 0x0002
+	KEYEVENTF_SCANCODE = 0x0008
+
+	INPUT_KEYBOARD = 1
+
+	CP_UTF8 = 65001
+)
+
+// keyInput Windows INPUT 结构体 (键盘)
+type keyInput struct {
+	Type      uint32
+	Ki        keyboardInput
+	Padding   [8]byte
+}
+
+type keyboardInput struct {
+	WVk         uint16
+	WScan       uint16
+	DwFlags     uint32
+	Time        uint32
+	DwExtraInfo uintptr
+}
+
+// MouseMove 移动鼠标到绝对坐标
+func (h *Handler) MouseMove(xRatio, yRatio float64) {
+	screenW, _, _ := procGetSystemMetrics.Call(uintptr(SM_CXSCREEN))
+	screenH, _, _ := procGetSystemMetrics.Call(uintptr(SM_CYSCREEN))
+
+	x := int(xRatio * float64(screenW) / h.cfg.Control.DpiScale)
+	y := int(yRatio * float64(screenH) / h.cfg.Control.DpiScale)
+
+	procSetCursorPos.Call(uintptr(x), uintptr(y))
+}
+
+// MouseClick 鼠标点击
+func (h *Handler) MouseClick(button string, action string) {
+	var downFlags, upFlags uintptr
+
+	switch button {
+	case "left":
+		downFlags = MOUSEEVENTF_LEFTDOWN
+		upFlags = MOUSEEVENTF_LEFTUP
+	case "right":
+		downFlags = MOUSEEVENTF_RIGHTDOWN
+		upFlags = MOUSEEVENTF_RIGHTUP
+	case "middle":
+		downFlags = MOUSEEVENTF_MIDDLEDOWN
+		upFlags = MOUSEEVENTF_MIDDLEUP
+	default:
+		log.Printf("Unknown mouse button: %s", button)
+		return
+	}
+
+	switch action {
+	case "click":
+		procMouseEvent.Call(downFlags, 0, 0, 0, 0)
+		procMouseEvent.Call(upFlags, 0, 0, 0, 0)
+	case "double":
+		procMouseEvent.Call(downFlags, 0, 0, 0, 0)
+		procMouseEvent.Call(upFlags, 0, 0, 0, 0)
+		procMouseEvent.Call(downFlags, 0, 0, 0, 0)
+		procMouseEvent.Call(upFlags, 0, 0, 0, 0)
+	case "down":
+		procMouseEvent.Call(downFlags, 0, 0, 0, 0)
+	case "up":
+		procMouseEvent.Call(upFlags, 0, 0, 0, 0)
+	}
+}
+
+// MouseScroll 鼠标滚轮
+func (h *Handler) MouseScroll(deltaY int) {
+	if deltaY == 0 {
+		return
+	}
+	// mouse_event 需要 dwData 参数
+	var dwData uintptr
+	if deltaY > 0 {
+		dwData = uintptr(WHEEL_DELTA)
+	} else {
+		dwData = uintptr(^uint32(WHEEL_DELTA-1)) // 负数用补码
+	}
+	procMouseEvent.Call(uintptr(MOUSEEVENTF_WHEEL), 0, 0, dwData, 0)
+}
+
+// MouseDrag 鼠标拖拽
+func (h *Handler) MouseDrag(startX, startY, endX, endY float64) {
+	h.MouseMove(startX, startY)
+	h.MouseClick("left", "down")
+	h.MouseMove(endX, endY)
+	h.MouseClick("left", "up")
+}
+
+// keyNameToVK 将字符串键名转换为 Windows 虚拟键码
+func keyNameToVK(key string) uint16 {
+	keyMap := map[string]uint16{
+		"backspace": 0x08,
+		"tab":       0x09,
+		"enter":     0x0D,
+		"shift":     0x10,
+		"ctrl":      0x11,
+		"alt":       0x12,
+		"escape":    0x1B,
+		"space":     0x20,
+		"pageup":    0x21,
+		"pagedown":  0x22,
+		"end":       0x23,
+		"home":      0x24,
+		"left":      0x25,
+		"up":        0x26,
+		"right":     0x27,
+		"down":      0x28,
+		"printscreen": 0x2C,
+		"insert":    0x2D,
+		"delete":    0x2E,
+		"cmd":       0x5B, // 左 Win
+		"win":       0x5B,
+		"f1":        0x70,
+		"f2":        0x71,
+		"f3":        0x72,
+		"f4":        0x73,
+		"f5":        0x74,
+		"f6":        0x75,
+		"f7":        0x76,
+		"f8":        0x77,
+		"f9":        0x78,
+		"f10":       0x79,
+		"f11":       0x7A,
+		"f12":       0x7B,
+		"numlock":   0x90,
+		"scrolllock": 0x91,
+	}
+
+	if vk, ok := keyMap[key]; ok {
+		return vk
+	}
+
+	// 单个字母/数字字符
+	if len(key) == 1 {
+		return uint16(key[0])
+	}
+
+	log.Printf("Unknown key: %s", key)
+	return 0
+}

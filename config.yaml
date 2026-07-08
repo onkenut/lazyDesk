@@ -1,0 +1,38 @@
+# lazyDesk 配置文件
+# 所有可配置项集中于此，程序启动时读取，禁止硬编码
+
+server:
+  port: 8080                # HTTP/WebSocket 服务端口
+  host: "0.0.0.0"           # 监听地址 (0.0.0.0 表示允许局域网内其他设备连接)
+
+ffmpeg:
+  # ffmpeg 可执行文件路径 (留空则使用系统 PATH 中的 ffmpeg)
+  path: ""
+  # 屏幕捕获参数
+  screen:
+    framerate: 30            # 捕获帧率
+    codec: "libx264"         # 视频编码器
+    preset: "ultrafast"      # x264 preset (ultrafast 保证最低延迟)
+    tune: "zerolatency"      # 零延迟调优
+    pix_fmt: "yuv420p"       # 像素格式 (兼容 WebRTC)
+  # 音频捕获参数
+  audio:
+    # Windows 音频输入设备名 (立体声混音)
+    device: "立体声混音 (Stereo Mix)"
+    codec: "libopus"         # 音频编码器 (Opus 为 WebRTC 原生格式)
+    bitrate: "128k"           # 音频比特率
+
+webrtc:
+  # ICE 服务器 (局域网内不需要 STUN/TURN，留空即可)
+  ice_servers: []
+
+control:
+  # DPI 缩放补偿 (通常应与 Windows 显示设置的缩放比例一致)
+  dpi_scale: 1.0              # 1.0 = 100%, 1.25 = 125%, 1.5 = 150%
+
+  # 长按判定时间 (毫秒)
+  long_press_ms: 500
+
+power:
+  # 电源控制是否启用
+  enabled: true

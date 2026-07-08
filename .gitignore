@@ -1,0 +1,24 @@
+# lazyDesk .gitignore
+
+# 二进制文件
+lazyDesk.exe
+lazyDesk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+*.exe
+*.test
+*.out
+
+# 本地配置覆盖 (不要提交个人配置)
+config.local.yaml
