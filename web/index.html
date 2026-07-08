@@ -83,18 +83,32 @@
 <script src="/app.js"></script>
 
 <script>
-// 预填并展示当前地址
+// 预填地址 + 连接逻辑 (不依赖 app.js)
 (function(){
   var h = window.location.host;
-  document.getElementById('overlayIP').value = h;
-  document.getElementById('overlayHost').textContent = h;
+  var ipEl = document.getElementById('overlayIP');
+  var hostEl = document.getElementById('overlayHost');
+  if (ipEl) ipEl.value = h;
+  if (hostEl) hostEl.textContent = h;
 })();
+
+// 自包含连接函数
 function connectOverlay() {
   var ip = document.getElementById('overlayIP').value.trim();
-  if (!ip) return;
+  if (!ip) { alert('请输入 IP 地址'); return; }
   document.getElementById('serverIP').value = ip;
   localStorage.setItem('lazyDesk_host', ip);
-  connect();
+  if (typeof connect === 'function') {
+    connect();
+  } else {
+    // fallback: 直接调 wsClient (ws.js 定义的全局)
+    if (typeof wsClient !== 'undefined') {
+      if (typeof pc !== 'undefined' && pc) { pc.close(); pc = null; }
+      wsClient.connect(ip);
+    } else {
+      alert('脚本加载失败，请刷新页面');
+    }
+  }
 }
 </script>
 </body>
