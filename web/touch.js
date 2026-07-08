@@ -1,126 +1,109 @@
-// touch.js — 触控事件→鼠标动作映射
+// touch.js — 触控→鼠标映射 (含 object-fit:contain 黑边补偿)
 (function() {
-  const touchLayer = document.getElementById('touchLayer');
-  if (!touchLayer) return;
+  const layer = document.getElementById('touchLayer');
+  const video = document.getElementById('remoteVideo');
+  if (!layer) return;
 
-  let startX = 0, startY = 0;
-  let startTime = 0;
-  let isDragging = false;
-  let longPressTimer = null;
-  const LONG_PRESS_MS = 500;
+  let sx = 0, sy = 0, st = 0, dragging = false, longTimer = null;
+  const LONG = 500;
 
-  // ====== 全局阻止浏览器手势 ======
+  // ====== 全局禁止浏览器手势 ======
   document.addEventListener('contextmenu', e => e.preventDefault());
-  document.addEventListener('gesturestart', e => e.preventDefault());
-  document.addEventListener('gesturechange', e => e.preventDefault());
-  document.addEventListener('gestureend', e => e.preventDefault());
+  ['gesturestart','gesturechange','gestureend'].forEach(e =>
+    document.addEventListener(e, ev => ev.preventDefault()));
 
-  // 禁止双击放大 (Android Chrome)
-  let lastTouchEnd = 0;
+  let lastEnd = 0;
   document.addEventListener('touchend', e => {
-    const now = Date.now();
-    if (now - lastTouchEnd <= 300) {
-      e.preventDefault();
-    }
-    lastTouchEnd = now;
+    if (Date.now() - lastEnd <= 300) e.preventDefault();
+    lastEnd = Date.now();
   }, { passive: false });
 
-  // 禁止 Ctrl+缩放
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey && ['+', '-', '=', '0'].includes(e.key)) {
-      e.preventDefault();
-    }
+    if (e.ctrlKey && ['+','-','=','0'].includes(e.key)) e.preventDefault();
   });
 
-  // ====== 触控→鼠标映射 ======
-  function getRatio(clientX, clientY) {
-    const rect = touchLayer.getBoundingClientRect();
+  // ====== 计算视频内容区 (补偿 object-fit:contain 黑边) ======
+  function videoContentRect() {
+    const vw = video.videoWidth  || 1920;
+    const vh = video.videoHeight || 1080;
+    const cw = layer.clientWidth;
+    const ch = layer.clientHeight;
+    if (!cw || !ch) return { left:0, top:0, width:1, height:1 };
+
+    const va = vw / vh;
+    const ca = cw / ch;
+    let w, h, ox, oy;
+
+    if (ca > va) {
+      // 容器更宽 → 垂直贴满，水平居中
+      h = ch; w = ch * va; ox = (cw - w) / 2; oy = 0;
+    } else {
+      // 容器更高 → 水平贴满，垂直居中
+      w = cw; h = cw / va; ox = 0; oy = (ch - h) / 2;
+    }
+    return { left: ox, top: oy, width: w, height: h };
+  }
+
+  function videoRatio(cx, cy) {
+    const r = videoContentRect();
     return {
-      x: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height))
+      x: Math.max(0, Math.min(1, (cx - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (cy - r.top)  / r.height))
     };
   }
 
-  function handleTouchStart(e) {
+  // ====== 触控事件 ======
+  function onStart(e) {
     e.preventDefault();
-    const touch = e.touches[0];
-    const ratio = getRatio(touch.clientX, touch.clientY);
-    startX = ratio.x;
-    startY = ratio.y;
-    startTime = Date.now();
-    isDragging = false;
+    const t = e.touches[0];
+    const r = videoRatio(t.clientX, t.clientY);
+    sx = r.x; sy = r.y; st = Date.now(); dragging = false;
 
     if (e.touches.length === 1) {
-      wsClient.send({ type: 'mouse_move', x: ratio.x, y: ratio.y });
-
-      longPressTimer = setTimeout(() => {
+      wsClient.send({ type: 'mouse_move', x: r.x, y: r.y });
+      longTimer = setTimeout(() => {
         wsClient.send({ type: 'mouse_click', button: 'right', action: 'click' });
-        isDragging = false;
-      }, LONG_PRESS_MS);
-    } else {
-      clearTimeout(longPressTimer);
-    }
+      }, LONG);
+    } else clearTimeout(longTimer);
   }
 
-  function handleTouchMove(e) {
+  function onMove(e) {
     e.preventDefault();
-
     if (e.touches.length === 1) {
-      const touch = e.touches[0];
-      const ratio = getRatio(touch.clientX, touch.clientY);
-
-      if (!isDragging) {
-        const dx = Math.abs(ratio.x - startX);
-        const dy = Math.abs(ratio.y - startY);
-        if (dx > 0.005 || dy > 0.005) {
-          isDragging = true;
-          clearTimeout(longPressTimer);
-        }
+      const r = videoRatio(e.touches[0].clientX, e.touches[0].clientY);
+      if (!dragging && (Math.abs(r.x-sx) > 0.005 || Math.abs(r.y-sy) > 0.005)) {
+        dragging = true; clearTimeout(longTimer);
       }
-
-      if (isDragging) {
-        wsClient.send({ type: 'mouse_move', x: ratio.x, y: ratio.y });
-      }
+      if (dragging) wsClient.send({ type: 'mouse_move', x: r.x, y: r.y });
     } else if (e.touches.length === 2) {
-      // 双指滑动 → 滚轮
-      clearTimeout(longPressTimer);
-      const touch1 = e.touches[0];
-      const touch2 = e.touches[1];
-      const r1 = getRatio(touch1.clientX, touch1.clientY);
-      const r2 = getRatio(touch2.clientX, touch2.clientY);
-      const centerY = (r1.y + r2.y) / 2;
-      
-      // 相对于起点的移动方向
-      const delta = centerY - startY;
-      if (Math.abs(delta) > 0.008) {
-        wsClient.send({ type: 'mouse_scroll', deltaY: delta > 0 ? 10 : -10 });
-        startY = centerY; // 更新起点
+      clearTimeout(longTimer);
+      const r1 = videoRatio(e.touches[0].clientX, e.touches[0].clientY);
+      const r2 = videoRatio(e.touches[1].clientX, e.touches[1].clientY);
+      const cy = (r1.y + r2.y) / 2;
+      if (Math.abs(cy - sy) > 0.008) {
+        wsClient.send({ type: 'mouse_scroll', deltaY: cy > sy ? 10 : -10 });
+        sy = cy;
       }
     }
   }
 
-  function handleTouchEnd(e) {
+  function onEnd(e) {
     e.preventDefault();
-    clearTimeout(longPressTimer);
-
-    if (!isDragging && e.changedTouches.length === 1) {
-      const elapsed = Date.now() - startTime;
-      if (elapsed < LONG_PRESS_MS) {
-        wsClient.send({ type: 'mouse_click', button: 'left', action: 'click' });
-      }
+    clearTimeout(longTimer);
+    if (!dragging && e.changedTouches.length === 1 && Date.now()-st < LONG) {
+      wsClient.send({ type: 'mouse_click', button: 'left', action: 'click' });
     }
-    isDragging = false;
+    dragging = false;
   }
 
-  // 绑定事件
-  touchLayer.addEventListener('touchstart', handleTouchStart, { passive: false });
-  touchLayer.addEventListener('touchmove', handleTouchMove, { passive: false });
-  touchLayer.addEventListener('touchend', handleTouchEnd, { passive: false });
+  layer.addEventListener('touchstart', onStart, { passive: false });
+  layer.addEventListener('touchmove',  onMove,  { passive: false });
+  layer.addEventListener('touchend',   onEnd,   { passive: false });
 
-  // 鼠标事件 (桌面调试用)
-  touchLayer.addEventListener('mousedown', (e) => {
-    const ratio = getRatio(e.clientX, e.clientY);
-    wsClient.send({ type: 'mouse_move', x: ratio.x, y: ratio.y });
+  // 桌面调试: 鼠标点击
+  layer.addEventListener('mousedown', e => {
+    const r = videoRatio(e.clientX, e.clientY);
+    wsClient.send({ type: 'mouse_move',  x: r.x, y: r.y });
     wsClient.send({ type: 'mouse_click', button: 'left', action: 'click' });
   });
 })();

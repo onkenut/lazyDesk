@@ -2,61 +2,47 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>lazyDesk - Remote Desktop</title>
+<title>lazyDesk</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
-<!-- z-0: 视频播放层 -->
-<video id="remoteVideo" autoplay playsinline muted
-       oncontextmenu="return false">
-</video>
-
-<!-- z-10: 透明触控覆盖层 -->
+<video id="remoteVideo" autoplay playsinline muted></video>
 <div id="touchLayer"></div>
 
-<!-- 连接遮罩层 (z-50，开始时显示) -->
+<!-- 连接遮罩 (仅自动连接失败时显示) -->
 <div id="connectOverlay">
   <div class="overlay-logo">🖥️ → 📱</div>
-  <div class="overlay-text">输入 PC 的 IP 地址连接</div>
+  <div class="overlay-text">正在连接 <span id="overlayHost"></span>...</div>
   <div class="overlay-form">
-    <input type="text" id="overlayIP" placeholder="例如: 192.168.1.100:8080">
-    <button onclick="connectOverlay()">
-      连接
-    </button>
+    <input type="text" id="overlayIP" placeholder="IP:端口">
+    <button onclick="connectOverlay()">连接</button>
   </div>
-  <div class="overlay-hint">
-    确保平板和 PC 在同一局域网
-  </div>
+  <div class="overlay-hint">自动连接失败时可手动输入</div>
 </div>
 
-<!-- z-30: 状态栏 -->
+<!-- 状态栏 -->
 <div id="statusBar">
   <span id="statusDot"></span>
-  <span id="statusText">未连接</span>
-  <input type="text" id="serverIP" placeholder="IP:端口"
-         style="display:none;">
+  <span id="statusText">连接中...</span>
 </div>
 
-<!-- z-40: 浮动切换按钮 -->
-<button id="togglePanelBtn" onclick="togglePanel()" title="显示/隐藏控制面板">⌨</button>
-<button id="keyboardBtn" onclick="toggleKeyboard()" title="打开文字输入">✏️</button>
+<!-- 浮动按钮 -->
+<button id="togglePanelBtn" onclick="togglePanel()" title="面板">⌨</button>
+<button id="keyboardBtn" onclick="toggleKeyboard()" title="输入">✏️</button>
 
-<!-- z-20: 虚拟按键面板 -->
+<!-- 虚拟按键面板 -->
 <div id="controlPanel">
-  <!-- 修饰键行 -->
   <div class="key-row">
-    <button class="mod-key" data-key="ctrl" id="ctrlKey">Ctrl</button>
-    <button class="mod-key" data-key="alt" id="altKey">Alt</button>
-    <button class="mod-key" data-key="shift" id="shiftKey">Shift</button>
-    <button class="mod-key" data-key="cmd" id="winKey">Win</button>
+    <button class="mod-key" data-key="ctrl">Ctrl</button>
+    <button class="mod-key" data-key="alt">Alt</button>
+    <button class="mod-key" data-key="shift">Shift</button>
+    <button class="mod-key" data-key="cmd">Win</button>
   </div>
-
-  <!-- 功能键行 -->
   <div class="key-row">
     <button class="fn-key" onclick="sendKey('escape')">Esc</button>
     <button class="fn-key" onclick="sendKey('tab')">Tab</button>
@@ -65,16 +51,12 @@
     <button class="fn-key" onclick="sendKey('backspace')">⌫</button>
     <button class="fn-key" onclick="sendKey('space')">␣</button>
   </div>
-
-  <!-- 方向键 -->
   <div class="key-row">
     <button class="fn-key" onclick="sendKey('up')">↑</button>
     <button class="fn-key" onclick="sendKey('left')">←</button>
     <button class="fn-key" onclick="sendKey('down')">↓</button>
     <button class="fn-key" onclick="sendKey('right')">→</button>
   </div>
-
-  <!-- 快捷宏 -->
   <div class="key-row">
     <button class="macro-key" onclick="sendCombo(['ctrl','c'])">复制</button>
     <button class="macro-key" onclick="sendCombo(['ctrl','v'])">粘贴</button>
@@ -82,15 +64,10 @@
     <button class="macro-key" onclick="sendCombo(['cmd','d'])">桌面</button>
     <button class="macro-key" onclick="sendCombo(['cmd','tab'])">切换</button>
   </div>
-
-  <!-- 文字输入 -->
   <div class="key-row">
-    <input type="text" id="textInput" placeholder="输入文本后点发送..."
-           autocomplete="off" autocorrect="off" autocapitalize="off">
+    <input type="text" id="textInput" placeholder="输入文本..." autocomplete="off" autocorrect="off" autocapitalize="off">
     <button onclick="sendText()" class="fn-key" style="flex:0 0 auto;min-width:50px;">发送</button>
   </div>
-
-  <!-- 电源控制 -->
   <div class="key-row" style="margin-top:4px;">
     <button class="power-key" onclick="sendPower('monitor_off')">熄屏</button>
     <button class="power-key" onclick="sendPower('lock')">锁屏</button>
@@ -105,15 +82,16 @@
 <script src="/controls.js"></script>
 <script src="/app.js"></script>
 
-<!-- 连接函数 (需要 HTML 内联因为 overlay 在 app.js 前定义) -->
 <script>
+// 预填并展示当前地址
+(function(){
+  var h = window.location.host;
+  document.getElementById('overlayIP').value = h;
+  document.getElementById('overlayHost').textContent = h;
+})();
 function connectOverlay() {
-  const ip = document.getElementById('overlayIP').value.trim();
-  if (!ip) {
-    alert('请输入 PC 的 IP 地址和端口');
-    return;
-  }
-  // 同步到隐藏的 serverIP
+  var ip = document.getElementById('overlayIP').value.trim();
+  if (!ip) return;
   document.getElementById('serverIP').value = ip;
   localStorage.setItem('lazyDesk_host', ip);
   connect();

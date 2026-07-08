@@ -1,175 +1,114 @@
 // webrtc.js — WebRTC 连接管理
 var pc = null;
 var videoReady = false;
-var remoteDescSet = false;   // remote description 是否已设置
-var iceBuffer = [];           // 缓冲的 ICE candidates
+var remoteDescSet = false;
+var iceBuffer = [];
 
 function startWebRTC() {
-  const remoteVideo = document.getElementById('remoteVideo');
-  if (!remoteVideo) {
-    console.error('remoteVideo element not found');
-    return;
-  }
+  const video = document.getElementById('remoteVideo');
+  if (!video) { console.error('video element missing'); return; }
 
   console.log('Starting WebRTC...');
   remoteDescSet = false;
   iceBuffer = [];
 
-  const config = { iceServers: [] };
-  pc = new RTCPeerConnection(config);
+  pc = new RTCPeerConnection({ iceServers: [] });
 
-  // 接收远程 track (视频/音频)
+  // 接收远程 track
   pc.ontrack = (event) => {
     console.log('ontrack:', event.track.kind, 'streams:', event.streams.length);
     if (event.streams.length > 0) {
       const stream = event.streams[0];
-      if (remoteVideo.srcObject !== stream) {
-        remoteVideo.srcObject = stream;
-        console.log('Video srcObject set');
-      }
-      remoteVideo.play().then(() => {
+      video.srcObject = stream;
+      console.log('Video srcObject set, calling play()...');
+      video.play().then(() => {
         console.log('Video playing ✓');
         videoReady = true;
-        if (document.getElementById('statusText')) {
-          document.getElementById('statusText').textContent = '已连接 (视频流)';
-        }
+        updateStatus('已连接 (视频流)', 'connected');
       }).catch(e => {
-        console.error('Video autoplay blocked:', e.name);
-        // 显示点击播放提示
-        if (document.getElementById('statusText')) {
-          document.getElementById('statusText').textContent = '已连接 (点画面播放)';
-        }
-        // 全页面点击事件解除静音
-        document.addEventListener('click', () => {
-          remoteVideo.play().then(() => {
-            console.log('Video playing after click');
-            videoReady = true;
-            if (document.getElementById('statusText')) {
-              document.getElementById('statusText').textContent = '已连接 (视频流)';
-            }
-          }).catch(() => {});
-        }, { once: true });
+        console.warn('Autoplay blocked:', e.name, '— waiting for user click');
+        updateStatus('已连接 (点画面播放)', '');
       });
     }
   };
 
-  // ICE candidate → 发送给服务器
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      console.log('ICE candidate (client):', event.candidate.type);
+  // 收集 ICE candidates → 发给服务器
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      console.log('ICE (client):', e.candidate.type, e.candidate.protocol);
       wsClient.send({
-        type: 'candidate',
-        candidate: event.candidate.candidate,
-        sdpMid: event.candidate.sdpMid,
-        sdpMLineIndex: event.candidate.sdpMLineIndex
+        type: 'candidate', candidate: e.candidate.candidate,
+        sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex
       });
-    } else {
-      console.log('ICE gathering complete (client)');
-    }
+    } else console.log('ICE gathering done (client)');
   };
 
-  // 连接状态
+  // 连接状态 → UI 更新
   pc.onconnectionstatechange = () => {
-    console.log('WebRTC state:', pc.connectionState);
-    const dot = document.getElementById('statusDot');
-    const text = document.getElementById('statusText');
-    
-    switch (pc.connectionState) {
-      case 'connected':
-        if (dot) dot.className = 'connected';
-        if (text) text.textContent = videoReady ? '已连接 (视频流)' : '已连接';
-        break;
-      case 'connecting':
-        if (dot) dot.className = '';
-        if (text) text.textContent = 'WebRTC 连接中...';
-        break;
-      case 'failed':
-      case 'disconnected':
-        if (dot) dot.className = 'disconnected';
-        if (text) text.textContent = 'WebRTC 断开';
-        break;
+    const s = pc.connectionState;
+    console.log('WebRTC state:', s);
+    switch (s) {
+      case 'connected':  videoReady || updateStatus('已连接', 'connected'); break;
+      case 'connecting': updateStatus('WebRTC 连接中...', ''); break;
+      case 'failed':     updateStatus('WebRTC 失败 — 检查防火墙', 'disconnected'); break;
+      case 'disconnected': updateStatus('WebRTC 断开', 'disconnected'); break;
     }
   };
+  pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
+  pc.onsignalingstatechange    = () => console.log('Signaling:', pc.signalingState);
 
-  // ICE 连接状态 (更细粒度)
-  pc.oniceconnectionstatechange = () => {
-    console.log('ICE state:', pc.iceConnectionState);
-  };
-
-  // 信令状态
-  pc.onsignalingstatechange = () => {
-    console.log('Signaling state:', pc.signalingState);
-  };
+  // 收集 ICE gathering 状态
+  pc.onicegatheringstatechange = () => console.log('ICE gathering:', pc.iceGatheringState);
 
   // 创建 Offer
-  pc.createOffer({
-    offerToReceiveAudio: false,
-    offerToReceiveVideo: true
-  }).then(offer => {
-    console.log('Offer created, setting local description...');
-    return pc.setLocalDescription(offer);
-  }).then(() => {
-    console.log('Local description set, sending offer to server...');
-    wsClient.send({
-      type: 'offer',
-      sdp: pc.localDescription.sdp
-    });
-  }).catch(err => {
-    console.error('Failed to create offer:', err);
-  });
+  pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: true })
+    .then(offer => {
+      console.log('Offer SDP has video:', /m=video/.test(offer.sdp));
+      return pc.setLocalDescription(offer);
+    })
+    .then(() => {
+      console.log('Local desc set, sending offer');
+      wsClient.send({ type: 'offer', sdp: pc.localDescription.sdp });
+    })
+    .catch(err => console.error('createOffer failed:', err));
 }
 
-// 处理来自服务器的信令消息
+// 处理服务器信令
 function handleWebRTCSignal(msg) {
-  if (!pc) {
-    console.warn('handleWebRTCSignal: pc is null');
-    return;
-  }
+  if (!pc) { console.warn('pc null, ignoring signal'); return; }
 
-  switch (msg.type) {
-    case 'answer':
-      console.log('Setting remote description (answer)...');
-      pc.setRemoteDescription(new RTCSessionDescription({
-        type: 'answer',
-        sdp: msg.sdp
-      })).then(() => {
-        console.log('Remote description set ✓');
-        remoteDescSet = true;
-        
-        // 处理缓冲的 ICE candidates
-        if (iceBuffer.length > 0) {
-          console.log('Processing', iceBuffer.length, 'buffered ICE candidates');
-          iceBuffer.forEach(c => {
-            pc.addIceCandidate(c).catch(err => {
-              console.error('Buffered ICE add error:', err);
-            });
-          });
-          iceBuffer = [];
-        }
-      }).catch(err => {
-        console.error('Set remote description error:', err);
-      });
-      break;
-
-    case 'candidate':
-      if (msg.candidate) {
-        const candidate = new RTCIceCandidate({
-          candidate: msg.candidate,
-          sdpMid: msg.sdpMid || null,
-          sdpMLineIndex: msg.sdpMLineIndex ?? null
-        });
-        
-        if (remoteDescSet) {
-          console.log('Adding ICE candidate (server)');
-          pc.addIceCandidate(candidate).catch(err => {
-            console.error('Add ICE candidate error:', err);
-          });
-        } else {
-          // 缓冲 ICE candidates 直到 remote desc 设置完成
-          console.log('Buffering ICE candidate (remote desc not set yet)');
-          iceBuffer.push(candidate);
-        }
+  if (msg.type === 'answer') {
+    console.log('Answer SDP has video:', /m=video/.test(msg.sdp));
+    pc.setRemoteDescription(new RTCSessionDescription({
+      type: 'answer', sdp: msg.sdp
+    })).then(() => {
+      console.log('Remote desc set ✓');
+      remoteDescSet = true;
+      // 处理缓冲的 ICE
+      if (iceBuffer.length) {
+        console.log('Flushing', iceBuffer.length, 'buffered ICE');
+        iceBuffer.forEach(c => pc.addIceCandidate(c).catch(() => {}));
+        iceBuffer = [];
       }
-      break;
+    }).catch(err => console.error('setRemoteDescription:', err));
+
+  } else if (msg.type === 'candidate' && msg.candidate) {
+    const c = new RTCIceCandidate({
+      candidate: msg.candidate, sdpMid: msg.sdpMid,
+      sdpMLineIndex: msg.sdpMLineIndex
+    });
+    if (remoteDescSet) {
+      pc.addIceCandidate(c).catch(err => console.error('addIceCandidate:', err));
+    } else {
+      console.log('Buffering ICE (remote desc not set)');
+      iceBuffer.push(c);
+    }
   }
+}
+
+function updateStatus(text, dotClass) {
+  const t = document.getElementById('statusText');
+  const d = document.getElementById('statusDot');
+  if (t) t.textContent = text;
+  if (d) d.className = dotClass;
 }
