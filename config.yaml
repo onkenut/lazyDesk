@@ -10,17 +10,41 @@ ffmpeg:
   path: ""
   # 屏幕捕获参数
   screen:
-    framerate: 30            # 捕获帧率
-    codec: "libx264"         # 视频编码器
-    preset: "ultrafast"      # x264 preset (ultrafast 保证最低延迟)
-    tune: "zerolatency"      # 零延迟调优
-    pix_fmt: "yuv420p"       # 像素格式 (兼容 WebRTC)
+    framerate: 60            # 捕获帧率 (NVENC 推荐 60fps)
+    codec: "h264_nvenc"      # 视频编码器: h264_nvenc (GPU硬编码) | libx264 (CPU软编码)
+    preset: "p1"             # NVENC: p1(最快)~p7(最佳画质) | x264: ultrafast...
+    tune: "ll"               # NVENC: ll(低延迟) | x264: zerolatency
+    pix_fmt: ""              # NVENC: 留空自动选择. x264: yuv420p
+    profile: "baseline"      # H.264 profile: baseline(最大兼容) | high(更好压缩)
+    bitrate: "15M"           # 视频码率 (1080p60 推荐 15M, LAN 可设 8-20M)
+    gop_size: 60             # IDR 帧间隔 (1秒@60fps, 新客户端最多等1秒即可解码)
+
+    # 捕获方式
+    capture:
+      method: "ddagrab"      # ddagrab (GPU零拷贝) | gdigrab (CPU回退)
+      output_idx: 0          # 显示器索引 (0=主屏)
+      draw_mouse: true       # 是否渲染光标到捕获画面
+      dup_frames: false      # false=不填充重复帧(更低延迟) | true=恒定帧率
+
+    # NVENC 硬编码专属参数 (仅 h264_nvenc 时生效)
+    nvenc:
+      rate_control: "cbr"    # 码率控制: cbr(恒定) | vbr | constqp
+      maxrate: "15M"         # 峰值码率 (= bitrate 则为纯 CBR)
+      bufsize: "250K"        # VBV 缓冲 (~bitrate/framerate = 1帧大小)
+      b_frames: 0            # B 帧数 (0=无重排序延迟)
+      multipass: 0           # 两通编码 (0=禁用)
+      delay: 0               # async_depth (0=零延迟)
+      no_scenecut: true      # 禁用场景切换检测
+      rc_lookahead: 0        # 前瞻帧数 (0=禁用)
+      b_ref_mode: 0          # B帧作为参考 (0=禁用)
+      nonref_p: true         # 允许非参考P帧
+
   # 音频捕获参数
   audio:
     # Windows 音频输入设备名 (立体声混音)
     device: "立体声混音 (Stereo Mix)"
     codec: "libopus"         # 音频编码器 (Opus 为 WebRTC 原生格式)
-    bitrate: "128k"           # 音频比特率
+    bitrate: "128k"          # 音频比特率
 
 webrtc:
   # ICE 服务器 (局域网内不需要 STUN/TURN，留空即可)
@@ -28,7 +52,7 @@ webrtc:
 
 control:
   # DPI 缩放补偿 (通常应与 Windows 显示设置的缩放比例一致)
-  dpi_scale: 1.0              # 1.0 = 100%, 1.25 = 125%, 1.5 = 150%
+  dpi_scale: 1.0            # 1.0 = 100%, 1.25 = 125%, 1.5 = 150%
 
   # 长按判定时间 (毫秒)
   long_press_ms: 500

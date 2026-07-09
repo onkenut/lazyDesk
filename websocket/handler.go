@@ -66,10 +66,22 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var connClosed sync.Once
-	closeConn := func() { connClosed.Do(func() { conn.Close() }) }
+	closeCh := make(chan struct{})
+	closeConn := func() {
+		connClosed.Do(func() {
+			close(closeCh)
+			conn.Close()
+		})
+	}
 	defer closeConn()
 
 	log.Printf("WebSocket client connected: %s", r.RemoteAddr)
+
+	// ROOT-1: Pong 处理器 — 客户端自动回复 Pong 时重置读超时
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
 
 	// N6: per-connection writeMu — 不同连接互不阻塞
 	writeMu := &sync.Mutex{}
@@ -122,6 +134,8 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		captureStarted = true
+		// ROOT-3: 重发缓存的 SPS/PPS，新连接可以立即解码
+		h.capture.ResendParameterSets()
 	}
 	defer func() {
 		if atomic.AddInt32(&h.connCount, -1) == 0 {
@@ -206,11 +220,45 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// ARCH-2: WebRTC 就绪后才启动 ffmpeg 捕获
 			startCapture()
 		case pionwebrtc.PeerConnectionStateFailed,
-			pionwebrtc.PeerConnectionStateDisconnected,
 			pionwebrtc.PeerConnectionStateClosed:
 			closeConn()
+		case pionwebrtc.PeerConnectionStateDisconnected:
+			// ROOT-5: ICE 短暂断开 — 给 ICE 重启机会，不立即关闭
+			go func() {
+				timer := time.NewTimer(30 * time.Second)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+					// 30s 后检查，如果仍未恢复则关闭
+					if pc.ConnectionState() == pionwebrtc.PeerConnectionStateDisconnected {
+						closeConn()
+					}
+				case <-closeCh:
+					// 连接已通过其他方式关闭
+				}
+			}()
 		}
 	})
+
+	// ROOT-1: 周期性 Ping 心跳 — 防止客户端无操作时 60s 读超时
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeMu.Lock()
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					writeMu.Unlock()
+					return
+				}
+				writeMu.Unlock()
+			case <-closeCh:
+				return
+			}
+		}
+	}()
 
 	// 主消息循环 — I3: 60s 读超时防 goroutine 泄漏
 	for {

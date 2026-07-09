@@ -2,11 +2,11 @@ package ffmpeg
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	sendBufSize = 30    // 发送缓冲帧数 ~1秒缓冲，Pion WriteSample 偶尔阻塞不丢帧
+	sendBufSize = 60    // 发送缓冲帧数 ~1秒@60fps，NVENC 输出更快需要更大缓冲
 	maxNALSize  = 16 * 1024 * 1024 // 16MB 单 NAL 上限
 )
 
@@ -42,16 +42,16 @@ type Capture struct {
 	nalBuf   []byte
 	foundNal bool
 	codeLen  int
-
-	// Access unit aggregation
-	au       [][]byte
-	hasSlice bool
 	frameNum int
 
 	// RTP timestamp (computed from config framerate)
 	rtpStep      uint32
 	rtpTimestamp uint32
 	frameDur     time.Duration
+
+	// ROOT-3: SPS/PPS 缓存 — 新连接重发参数集
+	cachedSPS []byte
+	cachedPPS []byte
 }
 
 func NewCapture(cfg *config.Config) *Capture {
@@ -88,18 +88,7 @@ func (c *Capture) Start() error {
 		fr = 30
 	}
 
-	args := []string{
-		"-f", "gdigrab",
-		"-framerate", fmt.Sprintf("%d", fr),
-		"-i", "desktop",
-		"-c:v", c.cfg.Ffmpeg.Screen.Codec,
-		"-preset", c.cfg.Ffmpeg.Screen.Preset,
-		"-tune", c.cfg.Ffmpeg.Screen.Tune,
-		"-pix_fmt", c.cfg.Ffmpeg.Screen.PixFmt,
-		"-an",
-		"-f", "h264",
-		"-",
-	}
+	args := c.buildFFmpegArgs(fr)
 
 	cmd := exec.Command(ff, args...)
 	cmd.Stderr = log.Writer()
@@ -118,8 +107,6 @@ func (c *Capture) Start() error {
 	c.cmd = cmd
 	c.codeLen = 4
 	c.nalBuf = make([]byte, 0, 128*1024)
-	c.au = nil
-	c.hasSlice = false
 	c.frameNum = 0
 	c.rtpTimestamp = 0
 	// B1: 动态计算 RTP 步进和帧间隔
@@ -164,7 +151,6 @@ func (c *Capture) sendLoop(gen int64) {
 
 func (c *Capture) readLoop(gen int64) {
 	defer func() {
-		c.flushAU(gen)
 		// I4: 关闭 stdout pipe，防止资源泄漏
 		if c.stdout != nil {
 			c.stdout.Close()
@@ -174,6 +160,7 @@ func (c *Capture) readLoop(gen int64) {
 			c.mu.Lock()
 			if c.cmd != nil {
 				c.cmd.Process.Kill()
+				c.cmd = nil // ROOT-2: 标记进程已退出，IsRunning() 不再返回过期 true
 			}
 			c.mu.Unlock()
 		}
@@ -200,22 +187,23 @@ func (c *Capture) readLoop(gen int64) {
 	}
 }
 
-// flushAU emits any remaining partial access unit (last frame on shutdown)
-func (c *Capture) flushAU(gen int64) {
-	if atomic.LoadInt64(&c.generation) != gen {
-		return
+// findStartCode 滑动窗口快速检测 H264 起始码 (0x000001 或 0x00000001)
+// 返回起始码位置和长度 (3 或 4)，未找到返回 -1,0
+func findStartCode(data []byte, off int) (pos int, codeLen int) {
+	var state uint32
+	for i := off; i < len(data); i++ {
+		state = (state << 8) | uint32(data[i])
+		// 检查 4 字节起始码 0x00000001
+		if i-off >= 3 && state == 0x00000001 {
+			return i - 3, 4
+		}
+		// 检查 3 字节起始码 0x000001 (仅当高位为 0 时)
+		if i-off >= 2 && (state&0x00FFFFFF) == 0x000001 {
+			return i - 2, 3
+		}
 	}
-	if c.hasSlice {
-		c.emitAU()
-		c.au = nil
-		c.hasSlice = false
-	}
+	return -1, 0
 }
-
-var (
-	pattern3 = []byte{0x00, 0x00, 0x01}
-	pattern4 = []byte{0x00, 0x00, 0x00, 0x01}
-)
 
 // process scans for H264 start codes and aggregates NALs into access units
 func (c *Capture) process(data []byte) {
@@ -225,16 +213,9 @@ func (c *Capture) process(data []byte) {
 	}
 
 	for i := 0; i < len(data); {
-		i3 := index(data, pattern3, i)
-		i4 := index(data, pattern4, i)
-
-		var spos, clen int
-		switch {
-		case i4 >= 0 && (i3 < 0 || i4 <= i3):
-			spos, clen = i4, 4
-		case i3 >= 0:
-			spos, clen = i3, 3
-		default:
+		spos, clen := findStartCode(data, i)
+		if spos < 0 {
+			// 未找到起始码，剩余数据进缓冲区
 			// B4: NAL 缓冲区上限保护
 			if len(data[i:])+len(c.nalBuf) > maxNALSize {
 				log.Printf("NAL buffer overflow (%d bytes), resetting", len(c.nalBuf))
@@ -259,79 +240,76 @@ func (c *Capture) process(data []byte) {
 	}
 }
 
-// onNalComplete processes a complete NAL unit, aggregating into access units
+// onNalComplete processes a complete NAL unit
+// NVENC baseline: one NAL per frame → send directly (no AU aggregation needed).
+// AUD (type 9) is dropped — it's a byte-alignment delimiter, not needed for decoding.
+// SPS/PPS are cached for ResendParameterSets.
 func (c *Capture) onNalComplete(nal []byte, codeLen int) {
 	if codeLen >= len(nal) {
 		return
 	}
 	nalType := nal[codeLen] & 0x1F
 
-	isSlice := nalType == 1 || nalType == 5
-
-	// Access unit boundaries: SPS(7) always; new slice after existing slice.
-	// AUD(9) is NOT a boundary — it belongs to the following frame as prefix.
-	isBoundary := nalType == 7 || (isSlice && c.hasSlice)
-
-	if isBoundary && c.hasSlice {
-		// 只 emit 包含 slice 的 AU，过滤纯 SPS/PPS/AUD 垃圾帧
-		c.emitAU()
-		c.au = nil
-		c.hasSlice = false
-	}
-
-	c.au = append(c.au, append([]byte(nil), nal...))
-	if isSlice {
-		c.hasSlice = true
-	}
-}
-
-// emitAU sends a complete access unit to the send channel (non-blocking)
-func (c *Capture) emitAU() {
-	if len(c.au) == 0 {
+	// AUD(9): frame boundary marker — drop it, pure overhead
+	if nalType == 9 {
 		return
 	}
 
-	var total int
-	for _, n := range c.au {
-		total += len(n)
+	// ROOT-3: 缓存 SPS/PPS
+	switch nalType {
+	case 7:
+		c.cachedSPS = append([]byte(nil), nal...)
+	case 8:
+		c.cachedPPS = append([]byte(nil), nal...)
 	}
-	data := make([]byte, 0, total)
-	for _, n := range c.au {
-		data = append(data, n...)
+
+	// 将 SPS/PPS/SEI/slice 作为独立 sample 发送
+	// NVENC baseline (-bf 0) 每个 frame 是单 NAL，Pion 逐 NAL 分包远优于大块 AU
+	isSlice := nalType == 1 || nalType == 5
+	if isSlice || nalType == 6 || nalType == 7 || nalType == 8 {
+		c.sendNAL(nal, isSlice)
+	}
+}
+
+// sendNAL sends a single NAL unit as a media sample (non-blocking)
+// Pion's H264Payloader expects Annex B format (WITH start codes) —
+// it uses h264.NALHeaders() internally to find NAL boundaries.
+func (c *Capture) sendNAL(nal []byte, isSlice bool) {
+	if !isSlice {
+		data := make([]byte, len(nal))
+		copy(data, nal)
+		sample := pmedia.Sample{
+			Data:            data,
+			PacketTimestamp: c.rtpTimestamp,
+			Duration:        c.frameDur,
+		}
+		select {
+		case c.sendCh <- sample:
+		default:
+		}
+		return
 	}
 
 	c.frameNum++
 	c.rtpTimestamp += c.rtpStep
 	if c.frameNum%300 == 0 {
-		log.Printf("video: %d frames sent, latest %d bytes", c.frameNum, total)
+		log.Printf("video: %d frames sent, latest %d bytes", c.frameNum, len(nal))
 	}
 
+	data := make([]byte, len(nal))
+	copy(data, nal)
 	sample := pmedia.Sample{
 		Data:            data,
 		PacketTimestamp: c.rtpTimestamp,
 		Duration:        c.frameDur,
 	}
-
-	// ARCH-1: 非阻塞投递到发送队列，不阻塞 readLoop
 	select {
 	case c.sendCh <- sample:
-		// 帧已入队，发送 goroutine 会处理
 	default:
-		// 发送队列满 → 丢帧（不阻塞读取管道）
 		if c.frameNum%30 == 0 {
 			log.Printf("video: send buffer full, dropping frame %d", c.frameNum)
 		}
 	}
-}
-
-func index(data, pat []byte, off int) int {
-	end := len(data) - len(pat)
-	for i := off; i <= end; i++ {
-		if bytes.Equal(data[i:i+len(pat)], pat) {
-			return i
-		}
-	}
-	return -1
 }
 
 func (c *Capture) Stop() {
@@ -353,6 +331,7 @@ func (c *Capture) Stop() {
 	}
 }
 
+// IsRunning 返回 ffmpeg 进程是否在运行
 func (c *Capture) IsRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -362,4 +341,131 @@ func (c *Capture) IsRunning() bool {
 	default:
 		return c.cmd != nil
 	}
+}
+
+// ResendParameterSets 将缓存的 SPS/PPS 写入当前 video track (重连场景)
+// 保留 Annex B 起始码 — Pion H264Payloader 需要起始码定位 NAL 边界
+func (c *Capture) ResendParameterSets() {
+	c.mu.Lock()
+	track := c.videoTrack
+	sps := c.cachedSPS
+	pps := c.cachedPPS
+	c.mu.Unlock()
+
+	if track == nil || sps == nil || pps == nil {
+		return
+	}
+
+	// SPS + PPS 合并为一个 sample (Pion 将其作为 STAP-A 发送)
+	au := make([]byte, 0, len(sps)+len(pps))
+	au = append(au, sps...)
+	au = append(au, pps...)
+
+	sample := pmedia.Sample{
+		Data:            au,
+		PacketTimestamp: c.rtpTimestamp,
+		Duration:        c.frameDur,
+	}
+	if err := track.WriteVideoSample(sample); err != nil {
+		log.Printf("ResendParameterSets: %v", err)
+	}
+}
+
+// buildFFmpegArgs 根据 codec 类型动态构建 ffmpeg 命令行参数
+func (c *Capture) buildFFmpegArgs(fr int) []string {
+	sc := c.cfg.Ffmpeg.Screen
+	var args []string
+
+	if strings.EqualFold(sc.Codec, "h264_nvenc") {
+		// ddagrab + NVENC GPU 硬编码管线 (lavfi 路径)
+		cap := sc.Capture
+		method := cap.Method
+		if method == "" {
+			method = "ddagrab"
+		}
+		dupVal := 0
+		if cap.DupFrames {
+			dupVal = 1
+		}
+		mouseVal := 0
+		if cap.DrawMouse {
+			mouseVal = 1
+		}
+		ddagrabFilter := fmt.Sprintf("ddagrab=output_idx=%d:framerate=%d:dup_frames=%d:draw_mouse=%d",
+			cap.OutputIdx, fr, dupVal, mouseVal)
+
+		args = append(args,
+			"-f", "lavfi",
+			"-i", ddagrabFilter,
+			"-c:v", "h264_nvenc",
+			"-preset", sc.Preset,
+			"-tune", sc.Tune,
+		)
+
+		// Profile
+		if sc.Profile != "" {
+			args = append(args, "-profile:v", sc.Profile)
+		}
+
+		// NVENC 专属参数
+		nv := sc.NVENC
+		if nv.RateControl != "" {
+			args = append(args, "-rc", nv.RateControl)
+		}
+		if sc.Bitrate != "" {
+			args = append(args, "-b:v", sc.Bitrate)
+		}
+		if nv.Maxrate != "" {
+			args = append(args, "-maxrate", nv.Maxrate)
+		}
+		if nv.Bufsize != "" {
+			args = append(args, "-bufsize", nv.Bufsize)
+		}
+		args = append(args,
+			"-multipass", fmt.Sprintf("%d", nv.Multipass),
+			"-delay", fmt.Sprintf("%d", nv.Delay),
+			"-rc-lookahead", fmt.Sprintf("%d", nv.RCLookahead),
+			"-b_ref_mode", fmt.Sprintf("%d", nv.BRefMode),
+			"-bf", fmt.Sprintf("%d", nv.BFrames),
+		)
+		if nv.NoScenecut {
+			args = append(args, "-no-scenecut", "1")
+		}
+		if nv.NonrefP {
+			args = append(args, "-nonref_p", "1")
+		}
+
+		// GOP 大小
+		gop := sc.GopSize
+		if gop <= 0 {
+			gop = 60
+		}
+		args = append(args, "-g", fmt.Sprintf("%d", gop))
+
+	} else {
+		// gdigrab + libx264 CPU 软编码管线 (回退方案)
+		args = append(args,
+			"-f", "gdigrab",
+			"-framerate", fmt.Sprintf("%d", fr),
+			"-i", "desktop",
+			"-c:v", sc.Codec,
+			"-preset", sc.Preset,
+			"-tune", sc.Tune,
+		)
+		if sc.PixFmt != "" {
+			args = append(args, "-pix_fmt", sc.PixFmt)
+		}
+		if sc.Profile != "" {
+			args = append(args, "-profile:v", sc.Profile)
+		}
+		if sc.Bitrate != "" {
+			args = append(args, "-b:v", sc.Bitrate)
+		}
+		if sc.GopSize > 0 {
+			args = append(args, "-g", fmt.Sprintf("%d", sc.GopSize))
+		}
+	}
+
+	args = append(args, "-an", "-f", "h264", "-")
+	return args
 }

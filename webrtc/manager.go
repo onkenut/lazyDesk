@@ -31,16 +31,14 @@ func (m *Manager) CreatePeerConnection() (*webrtc.PeerConnection, error) {
 	defer m.mu.Unlock()
 
 	// N5: 先关闭旧 PeerConnection，防止引用泄漏
+	// ROOT-4: 不在此处置空 m.videoTrack，避免 WriteVideoSample 读到 nil 静默丢帧。
 	if m.peerConn != nil {
 		m.peerConn.Close()
 		m.peerConn = nil
-		m.videoTrack = nil
-		m.audioTrack = nil
 	}
 
-	// 仅注册 H264 + Opus，精确匹配浏览器 offer 的 payload type。
-	// 不能用 RegisterDefaultCodecs()——它带 VP8/VP9/AV1 会排在 H264 前面，
-	// 导致浏览器优先选 VP8，服务端发 H264 → 解码失败黑屏。
+	// 仅注册 H264 (所有标准 profile) + Opus
+	// 精确控制 payload type，避免 RegisterDefaultCodecs 的 VP8/VP9 干扰
 	mediaEngine := &webrtc.MediaEngine{}
 
 	h264Profiles := []struct {
@@ -74,7 +72,6 @@ func (m *Manager) CreatePeerConnection() (*webrtc.PeerConnection, error) {
 		}
 	}
 
-	// Opus 音频
 	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:  webrtc.MimeTypeOpus,
