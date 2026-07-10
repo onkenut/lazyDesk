@@ -103,9 +103,5 @@
   document.addEventListener('pointermove', resetIdle);
   resetIdle();
 
-  // 首次点击 → 解除静音
-  document.addEventListener('click', function() {
-    var v = document.getElementById('remoteVideo');
-    if (v) { v.muted = false; v.play().catch(function(){}); }
-  }, { once: true });
+  // 首次点击播放由 webrtc.js ontrack autoplay fallback 处理，此处不再重复
 })();
