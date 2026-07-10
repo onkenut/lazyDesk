@@ -4,9 +4,13 @@
   var canvas = document.getElementById('remoteCanvas');
   if (!layer) return;
 
-  var sx=0, sy=0, st=0, dragging=false, isTwoFinger=false, longTimer=null, LONG=500;
+  var sx=0, sy=0, st=0, dragging=false, isTwoFinger=false, longTimer=null;
   var lastMove=0, MOVE_THROTTLE=16; // I1: touchmove 节流 ~60fps
   var lastScroll=0, SCROLL_THROTTLE=50; // 双指滚动节流
+
+  function getLongPressMs() {
+    return (window.lazyDeskConfig && window.lazyDeskConfig.longPressMs) || 500;
+  }
 
   // ====== 禁止浏览器手势 ======
   document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
@@ -46,7 +50,7 @@
       wsClient.send({type:'mouse_move',x:r.x,y:r.y});
       longTimer=setTimeout(function(){
         wsClient.send({type:'mouse_click',button:'right',action:'click'});
-      },LONG);
+      },getLongPressMs());
     }else{ isTwoFinger=true; clearTimeout(longTimer); }
   }
   function onMove(e) {
@@ -60,6 +64,7 @@
       var r=videoRatio(e.touches[0].clientX, e.touches[0].clientY);
       if(!dragging && (Math.abs(r.x-sx)>0.005||Math.abs(r.y-sy)>0.005)){
         dragging=true; clearTimeout(longTimer);
+        wsClient.send({type:'mouse_click',button:'left',action:'down'});
       }
       if(dragging) wsClient.send({type:'mouse_move',x:r.x,y:r.y});
     }else if(e.touches.length===2){
@@ -74,8 +79,11 @@
   function onEnd(e) {
     e.preventDefault(); clearTimeout(longTimer);
     // 双指操作结束后不触发点击
-    if(!dragging && !isTwoFinger && e.changedTouches.length===1 && Date.now()-st<LONG){
+    if(!dragging && !isTwoFinger && e.changedTouches.length===1 && Date.now()-st<getLongPressMs()){
       wsClient.send({type:'mouse_click',button:'left',action:'click'});
+    }
+    if(dragging && e.touches.length===0){
+      wsClient.send({type:'mouse_click',button:'left',action:'up'});
     }
     if(e.touches.length===0){ isTwoFinger=false; dragging=false; }
   }
