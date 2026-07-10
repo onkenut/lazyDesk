@@ -35,6 +35,7 @@ function startWebRTC() {
 
   try { pc = new RTCPeerConnection({ iceServers: [] }); }
   catch(e) { showFatal('创建连接失败: '+e.message); return; }
+  window.pc = pc; // 供 app.js watchdog/重连清理访问
 
   pc.ontrack = function(e) {
     console.log('ontrack:', e.track.kind);
@@ -74,7 +75,7 @@ function startWebRTC() {
     switch (s) {
       case 'connected':  videoReady || updateStatus('已连接', 'connected'); break;
       case 'failed':     showFatal('连接失败。请检查:\n1.PC防火墙UDP端口\n2.平板与PC同子网\n3.无VPN'); break;
-      case 'disconnected': updateStatus('WebRTC断开', 'disconnected'); break;
+      case 'disconnected': updateStatus('WebRTC断开, 等待重连...', 'disconnected'); break;
     }
   };
   pc.oniceconnectionstatechange = function() { console.log('ICE:', pc.iceConnectionState); };
@@ -112,7 +113,11 @@ function startCanvasRender(video, canvas) {
   window.addEventListener('resize', resize);
 
   function draw() {
-    if (!videoReady || video.readyState < 2) { drawRAF = requestAnimationFrame(draw); return; }
+    // readyState >= 2 (HAVE_CURRENT_DATA) 才有帧画面可绘
+    if (!videoReady || video.readyState < 2) {
+      drawRAF = requestAnimationFrame(draw);
+      return;
+    }
 
     var vw = video.videoWidth  || 1920;
     var vh = video.videoHeight || 1080;
