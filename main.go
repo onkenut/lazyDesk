@@ -38,7 +38,7 @@ func main() {
 	capture.SetVideoTrack(rtcManager)
 
 	// 3. 创建 WebSocket 信令处理器
-	wsHandler := websocket.NewHandler(rtcManager, capture, cmdHandler)
+	wsHandler := websocket.NewHandler(rtcManager, capture, cmdHandler, cfg)
 
 	// 4. 注册路由
 	mux := http.NewServeMux()
@@ -56,16 +56,21 @@ func main() {
 	log.Printf("lazyDesk server starting on http://%s", addr)
 	log.Printf("Open http://localhost:%d on your tablet browser", cfg.Server.Port)
 
+	errCh := make(chan error, 1)
 	go func() {
 		if err := http.ListenAndServe(addr, mux); err != nil {
-			log.Fatalf("Server error: %v", err)
+			errCh <- err
 		}
 	}()
 
 	// 6. 等待退出信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	select {
+	case err := <-errCh:
+		log.Printf("Server error: %v", err)
+	case <-sigCh:
+	}
 
 	log.Println("Shutting down...")
 	capture.Stop()
