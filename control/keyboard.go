@@ -5,6 +5,7 @@ package control
 import (
 	"log"
 	"os/exec"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -84,9 +85,11 @@ func (h *Handler) TextInput(text string) {
 }
 
 // setClipboard 将文本写入 Windows 剪贴板，使用 PowerShell。
+// 通过 stdin 传递文本，避免命令行参数解析问题 (空格/引号/特殊字符)。
 func setClipboard(text string) error {
 	cmd := exec.Command("powershell", "-NoProfile", "-Command",
-		"Set-Clipboard", "-Value", text)
+		"$input | Set-Clipboard")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.Stdin = strings.NewReader(text)
 	return cmd.Run()
 }

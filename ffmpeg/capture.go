@@ -52,6 +52,10 @@ type Capture struct {
 	rtpStep      uint32
 	rtpTimestamp uint32
 	frameDur     time.Duration
+
+	// SPS/PPS 缓存 — 新 PeerConnection 连接时重发，避免浏览器无解码参数黑屏
+	cachedSPS []byte
+	cachedPPS []byte
 }
 
 func NewCapture(cfg *config.Config) *Capture {
@@ -70,6 +74,41 @@ func (c *Capture) SetVideoTrack(w VideoWriter) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.videoTrack = w
+}
+
+// ResendParameterSets 将缓存的 SPS/PPS 作为独立 sample 发送给新 track，
+// 确保新连接的浏览器能正确解码后续 P 帧。在 WebRTC 连接建立后调用。
+func (c *Capture) ResendParameterSets() {
+	c.mu.Lock()
+	sps := c.cachedSPS
+	pps := c.cachedPPS
+	track := c.videoTrack
+	c.mu.Unlock()
+
+	if track == nil || (sps == nil && pps == nil) {
+		return
+	}
+
+	// 合并 SPS + PPS 为一个 sample 发送
+	var data []byte
+	if sps != nil {
+		data = append(data, sps...)
+	}
+	if pps != nil {
+		data = append(data, pps...)
+	}
+
+	sample := pmedia.Sample{
+		Data:     data,
+		Duration: 0, // 参数集无持续时间
+	}
+
+	select {
+	case c.sendCh <- sample:
+		log.Println("video: resent cached SPS/PPS to new peer")
+	default:
+		log.Println("video: send buffer full, cannot resend SPS/PPS")
+	}
 }
 
 func (c *Capture) Start() error {
@@ -96,6 +135,7 @@ func (c *Capture) Start() error {
 		"-preset", c.cfg.Ffmpeg.Screen.Preset,
 		"-tune", c.cfg.Ffmpeg.Screen.Tune,
 		"-pix_fmt", c.cfg.Ffmpeg.Screen.PixFmt,
+		"-g", fmt.Sprintf("%d", fr*2), // GOP: 每 2 秒一个 IDR 关键帧，加速重连恢复
 		"-an",
 		"-f", "h264",
 		"-",
@@ -122,6 +162,8 @@ func (c *Capture) Start() error {
 	c.hasSlice = false
 	c.frameNum = 0
 	c.rtpTimestamp = 0
+	c.cachedSPS = nil // 清除旧缓存
+	c.cachedPPS = nil
 	// B1: 动态计算 RTP 步进和帧间隔
 	c.rtpStep = uint32(90000 / fr)
 	c.frameDur = time.Second / time.Duration(fr)
@@ -174,6 +216,7 @@ func (c *Capture) readLoop(gen int64) {
 			c.mu.Lock()
 			if c.cmd != nil {
 				c.cmd.Process.Kill()
+				c.cmd = nil // FIX: 标记进程已退出，IsRunning() 不再返回过期 true
 			}
 			c.mu.Unlock()
 		}
@@ -265,6 +308,14 @@ func (c *Capture) onNalComplete(nal []byte, codeLen int) {
 		return
 	}
 	nalType := nal[codeLen] & 0x1F
+
+	// 缓存 SPS/PPS — 新 PeerConnection 连接时重发，避免浏览器黑屏
+	switch nalType {
+	case 7: // SPS
+		c.cachedSPS = append([]byte(nil), nal...)
+	case 8: // PPS
+		c.cachedPPS = append([]byte(nil), nal...)
+	}
 
 	isSlice := nalType == 1 || nalType == 5
 

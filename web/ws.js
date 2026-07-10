@@ -9,6 +9,8 @@ class WSClient {
     this.reconnectTimer = null;
     this.reconnectAttempts = 0;
     this.maxReconnectDelay = 10000;
+    this.heartbeatTimer = null;
+    this.HEARTBEAT_INTERVAL = 25000; // 25s 发送一次 ping，配合服务端 90s 读超时
   }
 
   connect(host) {
@@ -17,6 +19,20 @@ class WSClient {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     this.url = `${protocol}//${host}/ws`;
     this._doConnect();
+  }
+
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      this.send({ type: 'ping' });
+    }, this.HEARTBEAT_INTERVAL);
+  }
+
+  _stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   _doConnect() {
@@ -36,6 +52,7 @@ class WSClient {
       console.log('WebSocket connected');
       this._setStatus('connected');
       this.reconnectAttempts = 0;
+      this._startHeartbeat();
       // 连接成功后，等待 server_ready 消息
     };
 
@@ -47,6 +64,10 @@ class WSClient {
         // server_ready 触发 WebRTC 初始化
         if (msg.type === 'server_ready') {
           console.log('Server ready, starting WebRTC...');
+          if (msg.long_press_ms) {
+            window.lazyDeskConfig = window.lazyDeskConfig || {};
+            window.lazyDeskConfig.longPressMs = msg.long_press_ms;
+          }
           if (this.onReady) this.onReady();
         }
         
@@ -64,6 +85,7 @@ class WSClient {
 
     this.ws.onclose = (event) => {
       console.log(`WebSocket closed (code: ${event.code})`);
+      this._stopHeartbeat();
       this._setStatus('disconnected');
       this.ws = null;
       if (event.code !== 1000) {
@@ -99,6 +121,7 @@ class WSClient {
   }
 
   disconnect() {
+    this._stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

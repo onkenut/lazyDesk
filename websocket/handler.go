@@ -9,10 +9,17 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/onkenut/lazyDesk/config"
 	"github.com/onkenut/lazyDesk/control"
 	"github.com/onkenut/lazyDesk/ffmpeg"
 	slotwebrtc "github.com/onkenut/lazyDesk/webrtc"
 	pionwebrtc "github.com/pion/webrtc/v4"
+)
+
+const (
+	pingPeriod  = 25 * time.Second // Ping 间隔 (小于 readDeadline 的一半)
+	writeWait   = 10 * time.Second  // Write 超时
+	readTimeout = 90 * time.Second // 读超时 — 配合 Ping/Pong 保活
 )
 
 // 控制指令 JSON 结构体
@@ -39,16 +46,18 @@ type Handler struct {
 	rtcManager *slotwebrtc.Manager
 	capture    *ffmpeg.Capture
 	cmdHandler *control.Handler
+	cfg        *config.Config
 	upgrader   websocket.Upgrader
 	connCount  int32 // 活跃连接数 (引用计数)
 }
 
 // NewHandler 创建 WebSocket 处理器
-func NewHandler(rtc *slotwebrtc.Manager, cap *ffmpeg.Capture, cmd *control.Handler) *Handler {
+func NewHandler(rtc *slotwebrtc.Manager, cap *ffmpeg.Capture, cmd *control.Handler, cfg *config.Config) *Handler {
 	return &Handler{
 		rtcManager: rtc,
 		capture:    cap,
 		cmdHandler: cmd,
+		cfg:        cfg,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -66,10 +75,22 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var connClosed sync.Once
-	closeConn := func() { connClosed.Do(func() { conn.Close() }) }
+	closeCh := make(chan struct{})
+	closeConn := func() {
+		connClosed.Do(func() {
+			close(closeCh)
+			conn.Close()
+		})
+	}
 	defer closeConn()
 
 	log.Printf("WebSocket client connected: %s", r.RemoteAddr)
+
+	// 心跳: 设置 Pong handler — 浏览器收到 Ping 后自动回复 Pong，重置读超时
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return nil
+	})
 
 	// N6: per-connection writeMu — 不同连接互不阻塞
 	writeMu := &sync.Mutex{}
@@ -129,8 +150,11 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 发送就绪信号
-	sendJSON(map[string]interface{}{"type": "server_ready"})
+	// 发送就绪信号 (携带控制配置供前端使用)
+	sendJSON(map[string]interface{}{
+		"type":          "server_ready",
+		"long_press_ms": h.cfg.Control.LongPressMs,
+	})
 
 	// WebRTC Offer 处理
 	handleOffer := func(cmd *Command) {
@@ -205,16 +229,51 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case pionwebrtc.PeerConnectionStateConnected:
 			// ARCH-2: WebRTC 就绪后才启动 ffmpeg 捕获
 			startCapture()
+			// 重发缓存的 SPS/PPS 给新 PeerConnection，避免浏览器黑屏
+			h.capture.ResendParameterSets()
 		case pionwebrtc.PeerConnectionStateFailed,
-			pionwebrtc.PeerConnectionStateDisconnected,
 			pionwebrtc.PeerConnectionStateClosed:
 			closeConn()
+		case pionwebrtc.PeerConnectionStateDisconnected:
+			// 不立即关闭 — 给 ICE 30s 重启窗口恢复连接
+			go func() {
+				select {
+				case <-time.After(30 * time.Second):
+					if pc.ConnectionState() == pionwebrtc.PeerConnectionStateDisconnected {
+						log.Println("WebRTC disconnected > 30s, closing connection")
+						closeConn()
+					}
+				case <-closeCh:
+					// 连接已通过其他方式关闭
+				}
+			}()
 		}
 	})
 
-	// 主消息循环 — I3: 60s 读超时防 goroutine 泄漏
+	// 心跳: 定期发送 Ping 帧保持连接活跃
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeMu.Lock()
+				conn.SetWriteDeadline(time.Now().Add(writeWait))
+				err := conn.WriteMessage(websocket.PingMessage, nil)
+				writeMu.Unlock()
+				if err != nil {
+					log.Printf("Ping write error: %v", err)
+					return
+				}
+			case <-closeCh:
+				return
+			}
+		}
+	}()
+
+	// 主消息循环 — 配合 Ping/Pong 保活，纯观看不会断流
 	for {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -230,6 +289,11 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch cmd.Type {
+
+		// ===== 心跳 =====
+		case "ping":
+			// 应用层心跳 — 客户端也可以发送 ping 保活
+			continue
 
 		// ===== WebRTC 信令 =====
 		case "offer":

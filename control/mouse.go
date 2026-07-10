@@ -108,7 +108,6 @@ func (h *Handler) MouseScroll(deltaY int) {
 	// 每次 mouse_event 发送一个滚轮刻度 (WHEEL_DELTA = 120)
 	// 多次调用以支持滚动多格
 	var flags uintptr = MOUSEEVENTF_WHEEL
-	var dwData uintptr
 
 	steps := deltaY
 	if steps < 0 {
@@ -119,10 +118,14 @@ func (h *Handler) MouseScroll(deltaY int) {
 	}
 
 	for i := 0; i < steps; i++ {
+		var dwData uintptr
 		if deltaY > 0 {
 			dwData = WHEEL_DELTA
 		} else {
-			dwData = uintptr(^uint32(WHEEL_DELTA - 1)) // 补码表示 -120
+			// 负方向: -120 转 uint32 再转 uintptr。
+			// 用变量避免常量表达式溢出。
+			neg := -WHEEL_DELTA
+			dwData = uintptr(uint32(neg))
 		}
 		procMouseEvent.Call(flags, 0, 0, dwData, 0)
 	}
