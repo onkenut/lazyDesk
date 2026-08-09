@@ -19,3 +19,11 @@ vendor/
 # 配置文件(本地覆盖)
 config.local.yaml
 lazyDesk.exe~
+
+# AI 工具工作目录
+.hermes/
+.omo/
+.zcode/
+__pycache__/
+tools/edge_profile*/
+ws.log

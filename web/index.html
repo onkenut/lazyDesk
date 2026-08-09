@@ -11,13 +11,15 @@
 </head>
 <body>
 
-<!-- 隐藏的 video: 接收 WebRTC 流, 不显示 -->
+<!-- 隐藏的 video: 接收 WebRTC 视频流, 由 canvas 绘制 -->
 <video id="remoteVideo" autoplay playsinline muted style="display:none;"></video>
+<!-- 音频输出 -->
+<audio id="remoteAudio" autoplay></audio>
 
-<!-- canvas: 渲染视频帧 + 触控映射层 -->
+<!-- canvas: 渲染视频帧 + 触控映射层基准 -->
 <canvas id="remoteCanvas"></canvas>
 
-<!-- 透明触控覆盖层 (在 canvas 之上) -->
+<!-- 透明触控覆盖层 -->
 <div id="touchLayer"></div>
 
 <!-- 连接遮罩 -->
@@ -26,7 +28,7 @@
   <div class="overlay-text">正在连接 <span id="overlayHost"></span>...</div>
   <div class="overlay-form">
     <input type="text" id="overlayIP" placeholder="IP:端口">
-    <button onclick="connectOverlay()">连接</button>
+    <button id="connectBtn">连接</button>
   </div>
   <div class="overlay-hint">自动连接失败时可手动输入</div>
 </div>
@@ -35,11 +37,15 @@
 <div id="statusBar">
   <span id="statusDot"></span>
   <span id="statusText">连接中...</span>
+  <span id="statsText"></span>
 </div>
 
+<!-- 事件提示 -->
+<div id="eventToast" class="toast hidden"></div>
+
 <!-- 浮动按钮 -->
-<button id="togglePanelBtn" onclick="togglePanel()" title="面板">⌨</button>
-<button id="keyboardBtn" onclick="toggleKeyboard()" title="输入">✏️</button>
+<button id="togglePanelBtn" title="面板">▼</button>
+<button id="keyboardBtn" title="输入">✏️</button>
 
 <!-- 虚拟按键面板 -->
 <div id="controlPanel">
@@ -50,62 +56,38 @@
     <button class="mod-key" data-key="cmd">Win</button>
   </div>
   <div class="key-row">
-    <button class="fn-key" onclick="sendKey('escape')">Esc</button>
-    <button class="fn-key" onclick="sendKey('tab')">Tab</button>
-    <button class="fn-key" onclick="sendKey('delete')">Del</button>
-    <button class="fn-key" onclick="sendKey('enter')">↵</button>
-    <button class="fn-key" onclick="sendKey('backspace')">⌫</button>
-    <button class="fn-key" onclick="sendKey('space')">␣</button>
+    <button class="fn-key" data-sendkey="escape">Esc</button>
+    <button class="fn-key" data-sendkey="tab">Tab</button>
+    <button class="fn-key" data-sendkey="delete">Del</button>
+    <button class="fn-key" data-sendkey="enter">↵</button>
+    <button class="fn-key" data-sendkey="backspace">⌫</button>
+    <button class="fn-key" data-sendkey="space">␣</button>
   </div>
   <div class="key-row">
-    <button class="fn-key" onclick="sendKey('up')">↑</button>
-    <button class="fn-key" onclick="sendKey('left')">←</button>
-    <button class="fn-key" onclick="sendKey('down')">↓</button>
-    <button class="fn-key" onclick="sendKey('right')">→</button>
+    <button class="fn-key" data-sendkey="up">↑</button>
+    <button class="fn-key" data-sendkey="left">←</button>
+    <button class="fn-key" data-sendkey="down">↓</button>
+    <button class="fn-key" data-sendkey="right">→</button>
   </div>
   <div class="key-row">
-    <button class="macro-key" onclick="sendCombo(['ctrl','c'])">复制</button>
-    <button class="macro-key" onclick="sendCombo(['ctrl','v'])">粘贴</button>
-    <button class="macro-key" onclick="sendCombo(['alt','f4'])">Alt+F4</button>
-    <button class="macro-key" onclick="sendCombo(['cmd','d'])">桌面</button>
-    <button class="macro-key" onclick="sendCombo(['cmd','tab'])">切换</button>
+    <button class="macro-key" data-combo="ctrl,c">复制</button>
+    <button class="macro-key" data-combo="ctrl,v">粘贴</button>
+    <button class="macro-key" data-combo="alt,f4">Alt+F4</button>
+    <button class="macro-key" data-combo="cmd,d">桌面</button>
+    <button class="macro-key" data-combo="cmd,tab">切换</button>
   </div>
   <div class="key-row">
     <input type="text" id="textInput" placeholder="输入文本..." autocomplete="off" autocorrect="off" autocapitalize="off">
-    <button onclick="sendText()" class="fn-key" style="flex:0 0 auto;min-width:50px;">发送</button>
+    <button id="textSendBtn" class="fn-key" style="flex:0 0 auto;min-width:50px;">发送</button>
   </div>
   <div class="key-row" style="margin-top:4px;">
-    <button class="power-key" onclick="sendPower('monitor_off')">熄屏</button>
-    <button class="power-key" onclick="sendPower('lock')">锁屏</button>
-    <button class="power-key" onclick="sendPower('sleep')">睡眠</button>
-    <button class="power-key danger" onclick="if(confirm('确定关机?'))sendPower('shutdown')">关机</button>
+    <button class="power-key" data-power="monitor_off">熄屏</button>
+    <button class="power-key" data-power="lock">锁屏</button>
+    <button class="power-key" data-power="sleep">睡眠</button>
+    <button class="power-key danger" data-power="shutdown">关机</button>
   </div>
 </div>
 
-<script src="/ws.js"></script>
-<script src="/webrtc.js"></script>
-<script src="/touch.js"></script>
-<script src="/controls.js"></script>
-<script src="/app.js"></script>
-
-<script>
-(function(){
-  var h = window.location.host;
-  var ipEl = document.getElementById('overlayIP');
-  var hostEl = document.getElementById('overlayHost');
-  if (ipEl) ipEl.value = h;
-  if (hostEl) hostEl.textContent = h;
-})();
-function connectOverlay() {
-  var ip = document.getElementById('overlayIP').value.trim();
-  if (!ip) { alert('请输入 IP 地址'); return; }
-  localStorage.setItem('lazyDesk_host', ip);
-  if (typeof connect === 'function') connect();
-  else if (typeof wsClient !== 'undefined') {
-    if (typeof pc !== 'undefined' && pc) { pc.close(); pc = null; }
-    wsClient.connect(ip);
-  } else alert('脚本加载失败，请刷新页面');
-}
-</script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

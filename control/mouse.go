@@ -53,13 +53,20 @@ type keyboardInput struct {
 	DwExtraInfo uintptr
 }
 
-// MouseMove 移动鼠标到绝对坐标
-func (h *Handler) MouseMove(xRatio, yRatio float64) {
-	screenW, _, _ := procGetSystemMetrics.Call(uintptr(SM_CXSCREEN))
-	screenH, _, _ := procGetSystemMetrics.Call(uintptr(SM_CYSCREEN))
+// MouseMove 移动鼠标到绝对坐标。
+// xRatio/yRatio 为 0..1 归一化坐标 (来自触控层), screenW/screenH 为实际采集分辨率
+// (来自 ffmpeg 输出, 保证触摸点与画面精确对齐, 不受 DPI 缩放影响)。
+func (h *Handler) MouseMove(xRatio, yRatio float64, screenW, screenH int) {
+	if screenW <= 0 || screenH <= 0 {
+		// 采集未就绪时回退到系统度量
+		w, _, _ := procGetSystemMetrics.Call(uintptr(SM_CXSCREEN))
+		h, _, _ := procGetSystemMetrics.Call(uintptr(SM_CYSCREEN))
+		screenW = int(w)
+		screenH = int(h)
+	}
 
-	x := int(xRatio * float64(screenW) / h.cfg.Control.DpiScale)
-	y := int(yRatio * float64(screenH) / h.cfg.Control.DpiScale)
+	x := int(xRatio * float64(screenW))
+	y := int(yRatio * float64(screenH))
 
 	procSetCursorPos.Call(uintptr(x), uintptr(y))
 }
@@ -126,14 +133,6 @@ func (h *Handler) MouseScroll(deltaY int) {
 		}
 		procMouseEvent.Call(flags, 0, 0, dwData, 0)
 	}
-}
-
-// MouseDrag 鼠标拖拽
-func (h *Handler) MouseDrag(startX, startY, endX, endY float64) {
-	h.MouseMove(startX, startY)
-	h.MouseClick("left", "down")
-	h.MouseMove(endX, endY)
-	h.MouseClick("left", "up")
 }
 
 // keyNameToVK 将字符串键名转换为 Windows 虚拟键码

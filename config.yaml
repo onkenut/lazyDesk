@@ -41,8 +41,8 @@ ffmpeg:
 
   # 音频捕获参数
   audio:
-    # Windows 音频输入设备名 (立体声混音)
-    device: "立体声混音 (Stereo Mix)"
+    # 音频设备关键词 (按括号前主名模糊匹配, 如 "立体声混音")
+    device: "立体声混音"
     codec: "libopus"         # 音频编码器 (Opus 为 WebRTC 原生格式)
     bitrate: "128k"          # 音频比特率
 
@@ -51,8 +51,8 @@ webrtc:
   ice_servers: []
 
 control:
-  # DPI 缩放补偿 (通常应与 Windows 显示设置的缩放比例一致)
-  dpi_scale: 1.0            # 1.0 = 100%, 1.25 = 125%, 1.5 = 150%
+  # DPI 缩放补偿 (已废弃: v2 按 ffmpeg 实际采集分辨率精确映射坐标)
+  dpi_scale: 1.0
 
   # 长按判定时间 (毫秒)
   long_press_ms: 500

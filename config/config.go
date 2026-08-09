@@ -24,7 +24,7 @@ type ServerConfig struct {
 // ScreenConfig 屏幕捕获参数
 type ScreenConfig struct {
 	Framerate int          `yaml:"framerate"`
-	Codec     string       `yaml:"codec"`
+	Codec     string       `yaml:"codec"`     // h264_nvenc | libx264
 	Preset    string       `yaml:"preset"`
 	Tune      string       `yaml:"tune"`
 	PixFmt    string       `yaml:"pix_fmt"`
@@ -33,6 +33,7 @@ type ScreenConfig struct {
 	NVENC     NVENCConfig  `yaml:"nvenc"`     // NVENC 专属参数
 	Bitrate   string       `yaml:"bitrate"`   // 视频码率 (如 "15M")
 	GopSize   int          `yaml:"gop_size"`  // IDR 帧间隔
+	Fallback  bool         `yaml:"fallback"`  // true=所选编码器不可用时自动降级 (ddagrab+NVENC → gdigrab+x264)
 }
 
 // CaptureCfg 屏幕捕获方式配置
@@ -116,6 +117,7 @@ func Load(path string) (*Config, error) {
 					DrawMouse: true,
 					DupFrames: false,
 				},
+				Fallback: true,
 				NVENC: NVENCConfig{
 					RateControl: "cbr",
 					Maxrate:     "15M",

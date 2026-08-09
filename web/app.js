@@ -1,111 +1,109 @@
-// app.js — 应用主入口
-(function() {
-  var statusDot   = document.getElementById('statusDot');
-  var statusText  = document.getElementById('statusText');
-  var overlay     = document.getElementById('connectOverlay');
-  var overlayIP   = document.getElementById('overlayIP');
-  var overlayText = overlay ? overlay.querySelector('.overlay-text') : null;
+// app.js — 应用入口 (ESM)
+import { wsClient } from './modules/ws.js';
+import { webrtc } from './modules/webrtc.js';
+import { createRenderer } from './modules/render.js';
+import { initInput } from './modules/input.js';
+import { ui } from './modules/ui.js';
 
-  var connected = false;
-  var webrtcWatchdog = null;
-  var WEBRTC_TIMEOUT = 12000;
+const defaultHost = window.location.host;
+const overlayIP = document.getElementById('overlayIP');
+const overlayHost = document.getElementById('overlayHost');
 
-  function safeVal(el, v) { if (el) el.value = v; }
+// ====== 初始化 ======
+overlayIP.value = defaultHost;
+if (overlayHost) overlayHost.textContent = defaultHost;
 
-  var defaultHost = window.location.host;
-  safeVal(overlayIP, defaultHost);
-  if (overlayText) overlayText.textContent = '正在连接 ' + defaultHost + '...';
+const renderer = createRenderer(
+  document.getElementById('remoteVideo'),
+  document.getElementById('remoteCanvas'),
+);
+initInput(renderer);
+ui.initIdleFade();
 
-  // ====== WS 消息路由 ======
-  wsClient.onMessage = function(msg) {
-    if (msg.type === 'answer' || msg.type === 'candidate') {
-      if (typeof handleWebRTCSignal === 'function') handleWebRTCSignal(msg);
+// ====== WS 回调 ======
+wsClient.onReady = () => {
+  console.log('Server ready, starting WebRTC...');
+  ui.startWatchdog(() => {
+    if (!webrtc.videoReady && webrtc.pc && webrtc.pc.connectionState !== 'connected') {
+      ui.showError('连接超时: 请确认 1) PC 防火墙放行 UDP 2) 平板与 PC 同一局域网 3) 无 VPN 4) 浏览器未开启"隐藏本地IP"');
     }
-    if (msg.type === 'error') showError(msg.code + ': ' + msg.message);
-  };
+  });
+  webrtc.start(renderer);
+};
 
-  wsClient.onReady = function() {
-    console.log('Server ready, starting WebRTC...');
-    startWatchdog();
-    if (typeof startWebRTC === 'function') startWebRTC();
-  };
-
-  function startWatchdog() {
-    clearTimeout(webrtcWatchdog);
-    webrtcWatchdog = setTimeout(function() {
-      if (!videoReady && window.pc && window.pc.connectionState !== 'connected') {
-        showError('超时: 请确认防火墙允许UDP、平板与PC同子网、无VPN');
-      }
-    }, WEBRTC_TIMEOUT);
+wsClient.onMessage = (msg) => {
+  if (msg.type === 'answer' || msg.type === 'candidate') {
+    webrtc.handleSignal(msg);
   }
-
-  function showError(msg) {
-    console.error(msg);
-    if (overlay) overlay.style.display = 'flex';
-    if (overlayText) {
-      // 保留 span，只替换文本节点，不破坏 overlayHost 子元素
-      while (overlayText.firstChild) overlayText.removeChild(overlayText.firstChild);
-      overlayText.appendChild(document.createTextNode(msg));
-    }
-    if (statusText) statusText.textContent = '连接失败';
-    if (statusDot) statusDot.className = 'disconnected';
+  if (msg.type === 'error') {
+    ui.showError(msg.code + ': ' + msg.message);
   }
+  if (msg.type === 'stats') {
+    ui.updateStats(msg);
+  }
+  if (msg.type === 'event') {
+    ui.onEvent(msg);
+  }
+};
 
-  wsClient.onStatusChange = function(status) {
-    if (statusDot) statusDot.className = status;
-    switch (status) {
-      case 'connecting':
-        if (statusText) statusText.textContent = '连接中...';
-        if (overlayText) overlayText.textContent = '正在连接...';
-        break;
+wsClient.onStatusChange = (status) => {
+  window.dispatchEvent(new CustomEvent('lazydesk:conn', { detail: status }));
+  switch (status) {
+    case 'connecting':
+      ui.setStatus('连接中...');
+      break;
+    case 'connected':
+      ui.setStatus('已连接', 'connected');
+      break;
+    case 'disconnected':
+      ui.setStatus('已断开', 'disconnected');
+      ui.showOverlay('连接断开, 正在重连...');
+      break;
+  }
+};
+
+// ====== WebRTC 状态 → UI ======
+webrtc.onState = (state, detail) => {
+  if (state === 'video') {
+    ui.setStatus('已连接 (视频流)', 'connected');
+    ui.hideOverlay();
+    ui.clearWatchdog();
+  } else if (state === 'pc') {
+    switch (detail) {
       case 'connected':
-        connected = true;
-        if (statusText) statusText.textContent = '已连接';
-        if (overlay) overlay.style.display = 'none';
+        ui.setStatus('已连接', 'connected');
+        ui.clearWatchdog();
+        break;
+      case 'failed':
+        ui.showError('WebRTC 连接失败。请检查:\n1. PC 防火墙放行 UDP\n2. 平板与 PC 同子网\n3. 无 VPN');
         break;
       case 'disconnected':
-        connected = false;
-        if (statusText) statusText.textContent = '已断开';
-        if (overlay) overlay.style.display = 'flex';
-        if (overlayText) overlayText.textContent = '连接断开';
+        ui.setStatus('连接中断...', '');
         break;
     }
-    // N7: 重连时通知 controls.js 重置修饰键状态
-    if (typeof onConnectionStatusChange === 'function') {
-      onConnectionStatusChange(status);
-    }
-  };
-
-  window.connect = function() {
-    var host = (overlayIP && overlayIP.value.trim()) || defaultHost;
-    if (!host) return;
-    safeVal(overlayIP, host);
-    localStorage.setItem('lazyDesk_host', host);
-    if (overlayText) overlayText.textContent = '正在连接...';
-    if (window.pc) { window.pc.close(); window.pc = null; }
-    videoReady = false;
-    clearTimeout(webrtcWatchdog);
-    wsClient.connect(host);
-  };
-
-  setTimeout(function() { if (!connected) window.connect(); }, 200); // I6: 减少重连延迟
-
-  // 状态栏闲置淡出
-  var statusBar = document.getElementById('statusBar'), idleTimer;
-  function resetIdle() {
-    if (statusBar) statusBar.classList.remove('idle');
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(function() {
-      if (statusBar) statusBar.classList.add('idle');
-    }, 3000);
+  } else if (state === 'fatal') {
+    ui.showError(detail);
   }
-  document.addEventListener('touchstart', resetIdle);
-  document.addEventListener('pointermove', resetIdle);
-  resetIdle();
+};
 
-  // 首次点击 → 解除静音
-  document.addEventListener('click', function() {
-    var v = document.getElementById('remoteVideo');
-    if (v) { v.muted = false; v.play().catch(function(){}); }
-  }, { once: true });
-})();
+// ====== 连接入口 ======
+window.connect = function () {
+  const host = (overlayIP.value || '').trim() || defaultHost;
+  if (!host) return;
+  overlayIP.value = host;
+  localStorage.setItem('lazyDesk_host', host);
+  webrtc.stop();
+  ui.clearWatchdog();
+  ui.showOverlay('正在连接...');
+  wsClient.connect(host);
+};
+
+document.getElementById('connectBtn').addEventListener('click', () => window.connect());
+
+// 自动连接 (记住的地址优先)
+const saved = localStorage.getItem('lazyDesk_host');
+if (saved) {
+  overlayIP.value = saved;
+  if (overlayHost) overlayHost.textContent = saved;
+}
+setTimeout(() => window.connect(), 200);
